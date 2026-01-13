@@ -136,6 +136,11 @@ class ImmichSlideshowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors["base"] = "invalid_resolutions"
                         break
 
+            # Validate background path
+            bg_path = user_input.get(CONF_BACKGROUND_PATH, DEFAULT_BACKGROUND_PATH)
+            if ".." in bg_path or bg_path.startswith("/"):
+                errors["base"] = "invalid_path"
+
             if not errors:
                 hub = ImmichHub(
                     host=self._host,
@@ -240,7 +245,7 @@ class ImmichSlideshowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): bool,
                     vol.Optional(
                         CONF_BACKGROUND_PATH, default=DEFAULT_BACKGROUND_PATH
-                    ): vol.All(str, validate_background_path),
+                    ): str,
                 }
             ),
             errors=errors,

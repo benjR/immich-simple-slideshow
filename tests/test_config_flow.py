@@ -578,3 +578,150 @@ def test_migrate_legacy_options() -> None:
 
     result = migrate_legacy_options(new_options)
     assert result == new_options
+
+
+# =============================================================================
+# Schema Serialization Tests (for frontend compatibility)
+# =============================================================================
+
+
+def test_config_flow_schemas_are_serializable() -> None:
+    """Test that all config flow schemas can be serialized for the frontend.
+
+    This catches issues where custom validators are used in schemas that need
+    to be sent to the frontend (voluptuous_serialize must be able to convert them).
+    """
+    import voluptuous_serialize
+    from homeassistant.helpers import config_validation as cv
+    import voluptuous as vol
+    from homeassistant.const import CONF_HOST, CONF_API_KEY
+    from homeassistant.helpers.selector import (
+        NumberSelector,
+        NumberSelectorConfig,
+        NumberSelectorMode,
+        SelectSelector,
+        SelectSelectorConfig,
+        SelectSelectorMode,
+    )
+    from custom_components.immich_slideshow.const import (
+        CONF_BACKGROUND_PATH,
+        CONF_DAYS,
+        CONF_DUAL_PORTRAIT,
+        CONF_FAVORITES_FILTER,
+        CONF_MEMORY_YEARS,
+        CONF_MIX_RATIO,
+        CONF_REFRESH_INTERVAL,
+        CONF_RESOLUTIONS,
+        CONF_WRITE_FILES,
+        DEFAULT_BACKGROUND_PATH,
+        DEFAULT_DAYS,
+        DEFAULT_DUAL_PORTRAIT,
+        DEFAULT_FAVORITES_FILTER,
+        DEFAULT_MEMORY_YEARS,
+        DEFAULT_MIX_RATIO,
+        DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_RESOLUTIONS,
+        DEFAULT_WRITE_FILES,
+    )
+
+    # User step schema
+    user_schema = vol.Schema({vol.Required(CONF_HOST): str})
+
+    # API key step schema (mirrors config_flow.py async_step_api_key)
+    api_key_schema = vol.Schema({
+        vol.Required(CONF_API_KEY): str,
+        vol.Optional(CONF_MIX_RATIO, default=DEFAULT_MIX_RATIO): NumberSelector(
+            NumberSelectorConfig(min=0, max=100, step=5, mode=NumberSelectorMode.SLIDER)
+        ),
+        vol.Optional(CONF_DAYS, default=DEFAULT_DAYS): NumberSelector(
+            NumberSelectorConfig(min=0, max=365, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_MEMORY_YEARS, default=DEFAULT_MEMORY_YEARS): NumberSelector(
+            NumberSelectorConfig(min=0, max=20, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_DUAL_PORTRAIT, default=DEFAULT_DUAL_PORTRAIT): bool,
+        vol.Optional(CONF_FAVORITES_FILTER, default=DEFAULT_FAVORITES_FILTER): SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    {"value": "all", "label": "All photos"},
+                    {"value": "only", "label": "Favorites only"},
+                    {"value": "exclude", "label": "Exclude favorites"},
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+        vol.Optional(CONF_RESOLUTIONS, default=DEFAULT_RESOLUTIONS): str,
+        vol.Optional(CONF_REFRESH_INTERVAL, default=DEFAULT_REFRESH_INTERVAL): vol.All(
+            vol.Coerce(int), vol.Range(min=10, max=3600)
+        ),
+        vol.Optional(CONF_WRITE_FILES, default=DEFAULT_WRITE_FILES): bool,
+        vol.Optional(CONF_BACKGROUND_PATH, default=DEFAULT_BACKGROUND_PATH): str,
+    })
+
+    # These should not raise ValueError
+    # If they do, it means the schema contains non-serializable elements (like custom functions)
+    try:
+        voluptuous_serialize.convert(user_schema, custom_serializer=cv.custom_serializer)
+    except ValueError as e:
+        pytest.fail(f"User step schema is not serializable: {e}")
+
+    try:
+        voluptuous_serialize.convert(api_key_schema, custom_serializer=cv.custom_serializer)
+    except ValueError as e:
+        pytest.fail(f"API key step schema is not serializable: {e}")
+
+
+async def test_user_flow_invalid_background_path_traversal(
+    hass: HomeAssistant,
+) -> None:
+    """Test config flow rejects path traversal in background_path."""
+    # Step 1: Host URL
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input=MOCK_HOST_INPUT,
+    )
+
+    # Step 2: Path with traversal attempt
+    invalid_input = {
+        CONF_API_KEY: MOCK_API_KEY,
+        CONF_BACKGROUND_PATH: "../../../etc/passwd",
+    }
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input=invalid_input,
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_path"}
+
+
+async def test_user_flow_invalid_background_path_absolute(
+    hass: HomeAssistant,
+) -> None:
+    """Test config flow rejects absolute paths in background_path."""
+    # Step 1: Host URL
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input=MOCK_HOST_INPUT,
+    )
+
+    # Step 2: Absolute path
+    invalid_input = {
+        CONF_API_KEY: MOCK_API_KEY,
+        CONF_BACKGROUND_PATH: "/etc/passwd",
+    }
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input=invalid_input,
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_path"}
