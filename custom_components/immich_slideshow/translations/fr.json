@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Immich Simple Slideshow - Connexion",
+        "description": "Entrez l'URL de votre instance Immich",
+        "data": {
+          "host": "URL Immich"
+        },
+        "data_description": {
+          "host": "URL complète de votre instance Immich (ex: http://192.168.1.200:2283)"
+        }
+      },
+      "api_key": {
+        "title": "Immich Simple Slideshow - Clé API",
+        "description": "Créez une clé API dans Immich : [{api_keys_url}]({api_keys_url})\n\nPermissions requises : **asset.read**, **asset.download**, **memory.read**",
+        "data": {
+          "api_key": "Clé API",
+          "days": "Photos récentes (jours)",
+          "mix_ratio": "Mix Récentes / Souvenirs",
+          "memory_years": "Limite années souvenirs",
+          "dual_portrait": "Afficher 2 portraits côte à côte",
+          "favorites_filter": "Filtre favoris",
+          "resolutions": "Résolutions cibles",
+          "refresh_interval": "Intervalle de rafraîchissement (secondes)",
+          "write_files": "Écrire les fichiers pour View Assist",
+          "background_path": "Chemin de sortie arrière-plan"
+        },
+        "data_description": {
+          "api_key": "Collez la clé API créée dans Immich",
+          "days": "Photos des N derniers jours (0 = illimité)",
+          "mix_ratio": "0% = récentes uniquement, 100% = souvenirs uniquement",
+          "memory_years": "Années max pour les souvenirs (0 = illimité)",
+          "dual_portrait": "Combiner deux photos portrait côte à côte",
+          "favorites_filter": "Tous = pas de filtre, Favoris uniquement, Exclure favoris",
+          "resolutions": "Résolution cible (ex: 1920x1080)",
+          "refresh_interval": "Fréquence de changement de photo (10-3600s). Si View Assist, doit correspondre à son intervalle de rotation",
+          "write_files": "Activer pour écrire les fichiers image sur disque (requis pour le mode local_random de View Assist)",
+          "background_path": "Chemin relatif sous /config (ex: view_assist/images/backgrounds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter à Immich",
+      "invalid_auth": "Clé API invalide",
+      "invalid_resolutions": "Format de résolution invalide. Utilisez LxH (ex: 1920x1080)",
+      "invalid_path": "Chemin invalide. Doit être relatif et ne peut pas contenir '..'",
+      "unknown": "Erreur inattendue"
+    },
+    "abort": {
+      "already_configured": "Déjà configuré"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options Immich Simple Slideshow",
+        "data": {
+          "host": "URL Immich",
+          "api_key": "Clé API",
+          "days": "Photos récentes (jours)",
+          "mix_ratio": "Mix Récentes / Souvenirs",
+          "memory_years": "Limite années souvenirs",
+          "dual_portrait": "Afficher 2 portraits côte à côte",
+          "favorites_filter": "Filtre favoris",
+          "resolutions": "Résolutions cibles",
+          "refresh_interval": "Intervalle de rafraîchissement (secondes)",
+          "write_files": "Écrire les fichiers pour View Assist",
+          "background_path": "Chemin de sortie arrière-plan"
+        },
+        "data_description": {
+          "host": "URL complète de votre instance Immich. [Créer une clé API]({api_keys_url})",
+          "api_key": "Laisser inchangé pour garder la clé actuelle. Permissions : **asset.read**, **asset.download**, **memory.read**",
+          "days": "Photos des N derniers jours (0 = illimité)",
+          "mix_ratio": "0% = récentes uniquement, 100% = souvenirs uniquement",
+          "memory_years": "Années max pour les souvenirs (0 = illimité)",
+          "favorites_filter": "Tous = pas de filtre, Favoris uniquement, Exclure favoris",
+          "resolutions": "Résolution cible (ex: 1920x1080)",
+          "write_files": "Activer pour écrire les fichiers image sur disque (requis pour le mode local_random de View Assist)",
+          "background_path": "Chemin relatif sous /config (ex: view_assist/images/backgrounds)"
+        }
+      }
+    }
+  }
+}

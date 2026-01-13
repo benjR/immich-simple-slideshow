@@ -1,0 +1,12 @@
+{
+  "domain": "immich_slideshow",
+  "name": "Immich Simple Slideshow",
+  "codeowners": ["@benjR"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/benjR/immich-simple-slideshow",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/benjR/immich-simple-slideshow/issues",
+  "requirements": ["Pillow>=10.0.0"],
+  "version": "1.0.0"
+}

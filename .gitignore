@@ -1,0 +1,48 @@
+# Secrets & local config
+.mcp.json
+.env
+.env.*
+*.local
+
+# Dev notes
+ROADMAP.md
+DEVELOPMENT.md
+
+# Test stack (local dev environment)
+test-stack/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking & Linting
+.mypy_cache/
+.ruff_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build/Dev
+Makefile

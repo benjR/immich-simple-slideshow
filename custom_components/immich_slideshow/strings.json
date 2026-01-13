@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Immich Simple Slideshow - Connect",
+        "description": "Enter the URL of your Immich instance",
+        "data": {
+          "host": "Immich URL"
+        },
+        "data_description": {
+          "host": "Full URL to your Immich instance (e.g., http://192.168.1.200:2283)"
+        }
+      },
+      "api_key": {
+        "title": "Immich Simple Slideshow - API Key",
+        "description": "Create an API key in Immich: [{api_keys_url}]({api_keys_url})\n\nRequired permissions: **asset.read**, **asset.download**, **memory.read**",
+        "data": {
+          "api_key": "API Key",
+          "days": "Recent photos (days)",
+          "mix_ratio": "Memories mix",
+          "memory_years": "Memory years limit",
+          "dual_portrait": "Display 2 portraits side by side",
+          "favorites_filter": "Favorites filter",
+          "resolutions": "Target resolutions",
+          "refresh_interval": "Refresh interval (seconds)",
+          "write_files": "Write files for View Assist",
+          "background_path": "Background output path"
+        },
+        "data_description": {
+          "api_key": "Paste the API key you created in Immich",
+          "days": "Show recent photos from the last N days (0 to disable recent photos)",
+          "mix_ratio": "Percentage of 'On This Day' memories in the slideshow (0% = recent only, 100% = memories only)",
+          "memory_years": "How many years back to look for memories (0 = unlimited)",
+          "dual_portrait": "When a portrait photo is selected, find another portrait and display them side by side",
+          "favorites_filter": "Filter photos by favorite status: All (no filter), Favorites only, or Exclude favorites",
+          "resolutions": "Target resolution for the slideshow (e.g., 1920x1080)",
+          "refresh_interval": "How often to change the photo (10-3600 seconds)",
+          "write_files": "Enable to write image files to disk (required for View Assist local_random mode)",
+          "background_path": "Relative path under /config where images are saved (e.g., view_assist/images/backgrounds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Immich",
+      "invalid_auth": "Invalid API key",
+      "invalid_resolutions": "Invalid resolution format. Use WxH (e.g., 1920x1080). Range: 640-3840 x 480-2160",
+      "invalid_path": "Invalid path. Must be relative and cannot contain '..'",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Immich Simple Slideshow Options",
+        "data": {
+          "host": "Immich URL",
+          "api_key": "API Key",
+          "days": "Recent photos (days)",
+          "mix_ratio": "Memories mix",
+          "memory_years": "Memory years limit",
+          "dual_portrait": "Display 2 portraits side by side",
+          "favorites_filter": "Favorites filter",
+          "resolutions": "Target resolutions",
+          "refresh_interval": "Refresh interval (seconds)",
+          "write_files": "Write files for View Assist",
+          "background_path": "Background output path"
+        },
+        "data_description": {
+          "host": "Full URL to your Immich instance. [Create API key]({api_keys_url})",
+          "api_key": "Leave unchanged to keep current key. Permissions: **asset.read**, **asset.download**, **memory.read**",
+          "days": "Show recent photos from the last N days (0 to disable recent photos)",
+          "mix_ratio": "Percentage of 'On This Day' memories in the slideshow (0% = recent only, 100% = memories only)",
+          "memory_years": "How many years back to look for memories (0 = unlimited)",
+          "favorites_filter": "Filter photos by favorite status: All (no filter), Favorites only, or Exclude favorites",
+          "resolutions": "Target resolution for the slideshow (e.g., 1920x1080)",
+          "write_files": "Enable to write image files to disk (required for View Assist local_random mode)",
+          "background_path": "Relative path under /config where images are saved (e.g., view_assist/images/backgrounds)"
+        }
+      }
+    }
+  }
+}
