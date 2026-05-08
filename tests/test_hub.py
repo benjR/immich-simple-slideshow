@@ -733,25 +733,93 @@ async def test_get_album_assets_server_error() -> None:
 
 
 async def test_search_random_from_albums_success() -> None:
-    """Test successful random search from specific albums."""
+    """Test successful random search from specific albums (one call per album).
+
+    Workaround for Immich's AND-only albumIds filter: hub fans out one call
+    per album and combines results. Each asset is tagged with its source
+    album_id (`_album_id`).
+    """
     hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
     album_ids = ["album-1", "album-2"]
 
+    # Per-album response: hub does ceil(count/n_albums) per call → 5 each here
     mock_assets = [
-        {"id": "asset-1", "type": "IMAGE"},
-        {"id": "asset-2", "type": "IMAGE"},
-        {"id": "asset-3", "type": "IMAGE"},
+        {"id": "asset-A", "type": "IMAGE"},
+        {"id": "asset-B", "type": "IMAGE"},
+        {"id": "asset-C", "type": "IMAGE"},
     ]
+
+    with aioresponses() as mock:
+        # repeat=True so the mock answers both parallel POSTs identically
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=mock_assets,
+            repeat=True,
+        )
+
+        result = await hub.search_random_from_albums(album_ids, count=10)
+        # Both album calls returned 3 assets each → 6 total, slice to 10 → 6
+        assert len(result) == 6
+        ids = {a["id"] for a in result}
+        assert ids == {"asset-A", "asset-B", "asset-C"}
+        # Every asset must carry the source album tag (one of album-1, album-2)
+        assert all(a.get("_album_id") in album_ids for a in result)
+
+    await hub.close()
+
+
+async def test_search_random_from_albums_count_smaller_than_album_count() -> None:
+    """When count < len(album_ids), only a random subset of albums is queried."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_ids = ["album-1", "album-2", "album-3", "album-4"]
 
     with aioresponses() as mock:
         mock.post(
             f"{MOCK_HOST}/api/search/random",
-            payload=mock_assets,
+            payload=[{"id": "x", "type": "IMAGE"}],
+            repeat=True,
         )
 
-        result = await hub.search_random_from_albums(album_ids, count=10)
-        assert len(result) == 3
-        assert result[0]["id"] == "asset-1"
+        result = await hub.search_random_from_albums(album_ids, count=2)
+        # Only 2 albums queried (count=2 < 4 albums), 1 photo each → 2 results
+        assert len(result) == 2
+
+    await hub.close()
+
+
+async def test_search_random_from_albums_REGRESSION_one_id_per_call() -> None:
+    """REGRESSION: Immich's albumIds filter is AND, not OR.
+
+    Bundling multiple album IDs into a single request body returns 0 assets
+    when no asset is in *all* listed albums. The hub MUST issue one call per
+    album with a single-element albumIds array. This test inspects every
+    captured request body to enforce that contract.
+    """
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_ids = ["album-1", "album-2", "album-3"]
+
+    with aioresponses() as mock:
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[], repeat=True)
+        await hub.search_random_from_albums(album_ids, count=10)
+
+        # Inspect every captured request body
+        bodies = [
+            call.kwargs.get("json", {})
+            for (method, _), calls in mock.requests.items()
+            if method == "POST"
+            for call in calls
+        ]
+        assert len(bodies) == 3, f"Expected 3 calls (one per album), got {len(bodies)}"
+        for body in bodies:
+            assert "albumIds" in body
+            assert isinstance(body["albumIds"], list)
+            assert len(body["albumIds"]) == 1, (
+                f"Body must contain a SINGLE-element albumIds (AND-bug regression), "
+                f"got {len(body['albumIds'])}: {body['albumIds']}"
+            )
+        # All three album IDs must each have been queried exactly once
+        ids_used = sorted(b["albumIds"][0] for b in bodies)
+        assert ids_used == sorted(album_ids)
 
     await hub.close()
 
@@ -849,7 +917,7 @@ async def test_search_random_in_any_album_server_error() -> None:
 
 
 async def test_search_random_by_person_success() -> None:
-    """Test successful random search by person."""
+    """Test successful random search by person (single person)."""
     hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
     person_ids = ["person-1"]
 
@@ -873,9 +941,69 @@ async def test_search_random_by_person_success() -> None:
         )
 
         result = await hub.search_random_by_person(person_ids, count=10)
-        assert len(result) == 2
-        assert result[0]["id"] == "asset-1"
-        assert result[1]["id"] == "asset-2"
+        # Order is randomized by combine+shuffle; check the set
+        assert {a["id"] for a in result} == {"asset-1", "asset-2"}
+
+    await hub.close()
+
+
+async def test_search_random_by_person_multiple_persons_fans_out() -> None:
+    """Multi-person search fans out one call per person (workaround for AND-only API)."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    person_ids = ["person-1", "person-2"]
+
+    # Mock returns the same payload for both parallel calls. The client-side
+    # filter then keeps only assets that contain the queried person.
+    mock_assets = [
+        {"id": "asset-with-1", "type": "IMAGE", "people": [{"id": "person-1"}]},
+        {"id": "asset-with-2", "type": "IMAGE", "people": [{"id": "person-2"}]},
+    ]
+    with aioresponses() as mock:
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=mock_assets,
+            repeat=True,
+        )
+
+        result = await hub.search_random_by_person(person_ids, count=4)
+        # One call per person, each response filtered to the matching person.
+        # Result combines both → both ids present.
+        assert {a["id"] for a in result} == {"asset-with-1", "asset-with-2"}
+
+    await hub.close()
+
+
+async def test_search_random_by_person_REGRESSION_one_id_per_call() -> None:
+    """REGRESSION: Immich's personIds filter is AND, not OR.
+
+    Bundling multiple person IDs into a single body returns only assets that
+    contain ALL listed persons, which is virtually never the case for a family
+    setup → 0 results. The hub MUST issue one call per person with a
+    single-element personIds array.
+    """
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    person_ids = ["p-1", "p-2", "p-3", "p-4"]
+
+    with aioresponses() as mock:
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[], repeat=True)
+        await hub.search_random_by_person(person_ids, count=8)
+
+        bodies = [
+            call.kwargs.get("json", {})
+            for (method, _), calls in mock.requests.items()
+            if method == "POST"
+            for call in calls
+        ]
+        assert len(bodies) == 4, f"Expected 4 calls (one per person), got {len(bodies)}"
+        for body in bodies:
+            assert "personIds" in body
+            assert isinstance(body["personIds"], list)
+            assert len(body["personIds"]) == 1, (
+                f"Body must contain a SINGLE-element personIds (AND-bug regression), "
+                f"got {len(body['personIds'])}: {body['personIds']}"
+            )
+        ids_used = sorted(b["personIds"][0] for b in bodies)
+        assert ids_used == sorted(person_ids)
 
     await hub.close()
 
@@ -921,10 +1049,9 @@ async def test_search_random_by_person_filters_api_bug() -> None:
 
         result = await hub.search_random_by_person(person_ids, count=10)
 
-        # Should only include assets with person-1
-        assert len(result) == 2
-        assert result[0]["id"] == "asset-correct"
-        assert result[1]["id"] == "asset-also-correct"
+        # Should only include assets actually containing person-1.
+        # Order is randomized by combine+shuffle; check the set.
+        assert {a["id"] for a in result} == {"asset-correct", "asset-also-correct"}
 
     await hub.close()
 

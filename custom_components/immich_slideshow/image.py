@@ -730,47 +730,31 @@ class SlideshowManager:
     async def _fetch_albums(self, count: int) -> list[dict]:
         """Fetch random photos from albums.
 
-        If specific albums are selected, fetches from those albums only.
-        If no albums are selected, fetches from ANY album (isNotInAlbum: false).
+        Always fans out via `search_random_from_albums`, which issues one call
+        per album in parallel and tags each asset with `_album_id`.
+
+        - If specific albums are selected (`albums_include` non-empty), the
+          fan-out is restricted to those.
+        - Otherwise ("any album" mode), the fan-out targets the user's full
+          album list cached in `_album_names`. We avoid Immich's
+          `isNotInAlbum: false` filter — it returns assets that aren't in any
+          album, which makes album attribution impossible.
+
+        If `_album_names` isn't populated (e.g. perm missing), returns [].
         """
         if self._albums_include:
-            # Use efficient search/random with specific albumIds
-            assets = await self._hub.search_random_from_albums(
-                album_ids=self._albums_include,
-                count=count,
-            )
+            album_ids = self._albums_include
         else:
-            # No specific albums selected: fetch from any album
-            assets = await self._hub.search_random_in_any_album(count=count)
+            album_ids = list(self._album_names.keys())
 
-        # Tag source — attribute album_id when possible so the entity can expose
-        # the album name. Three cases:
-        #   1. Exactly one album in albums_include  → cheap, attribute directly
-        #   2. Multiple albums in albums_include    → resolve per-asset via API
-        #   3. Mode "any album" (empty include)     → resolve per-asset via API
-        single_album_id = (
-            self._albums_include[0]
-            if len(self._albums_include) == 1
-            else None
+        if not album_ids:
+            return []
+
+        assets = await self._hub.search_random_from_albums(
+            album_ids=album_ids, count=count
         )
         for asset in assets:
             asset["_source"] = "album"
-            if single_album_id:
-                asset["_album_id"] = single_album_id
-
-        if not single_album_id and assets:
-            # Per-asset album lookup, parallel with bounded concurrency
-            sem = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
-
-            async def resolve(asset: dict) -> None:
-                async with sem:
-                    found = await self._hub.get_albums_for_asset(asset["id"])
-                if found:
-                    # First album wins for display attribution
-                    asset["_album_id"] = found[0].get("id")
-
-            await asyncio.gather(*(resolve(a) for a in assets), return_exceptions=True)
-
         return assets
 
     async def _fetch_persons(self, count: int) -> list[dict]:

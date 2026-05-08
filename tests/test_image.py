@@ -785,22 +785,54 @@ async def test_manager_fetch_albums_with_specific_albums(
 
 
 async def test_manager_fetch_albums_any_album(mock_hub: AsyncMock) -> None:
-    """Test _fetch_albums uses search_random_in_any_album when no specific albums."""
+    """Test _fetch_albums in any-album mode fans out across the cached album list.
+
+    Avoids Immich's broken `isNotInAlbum: false` filter (returns assets that
+    aren't actually in any album). Instead, uses the manager's _album_names
+    cache as the album pool and lets `search_random_from_albums` do the
+    fan-out + per-asset _album_id tagging.
+    """
     manager = SlideshowManager(
         hub=mock_hub,
         dual_portrait=False,
-        albums_include=[],  # No specific albums
+        albums_include=[],  # any-album mode
     )
+    # Pre-populate the album-names cache as if a previous refill had run.
+    manager._album_names = {"album-A": "Album A", "album-B": "Album B"}
+    manager._albums_fetched = True
 
-    mock_hub.search_random_in_any_album.return_value = [
-        {"id": "any-album-asset", "type": "IMAGE"},
+    mock_hub.search_random_from_albums.return_value = [
+        {"id": "any-album-asset", "type": "IMAGE", "_album_id": "album-A"},
     ]
 
     result = await manager._fetch_albums(count=10)
 
-    mock_hub.search_random_in_any_album.assert_called_with(count=10)
+    mock_hub.search_random_from_albums.assert_called_once()
+    call_kwargs = mock_hub.search_random_from_albums.call_args.kwargs
+    assert set(call_kwargs["album_ids"]) == {"album-A", "album-B"}
+    assert call_kwargs["count"] == 10
+    # search_random_in_any_album must NOT be called any more
+    mock_hub.search_random_in_any_album.assert_not_called()
     assert len(result) == 1
     assert result[0]["_source"] == "album"
+
+
+async def test_manager_fetch_albums_any_album_empty_cache(
+    mock_hub: AsyncMock,
+) -> None:
+    """If the album cache is empty (e.g. perm missing), _fetch_albums returns []."""
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        albums_include=[],
+    )
+    manager._album_names = {}
+    manager._albums_fetched = True
+
+    result = await manager._fetch_albums(count=10)
+
+    assert result == []
+    mock_hub.search_random_from_albums.assert_not_called()
 
 
 async def test_manager_fetch_persons_empty_list(

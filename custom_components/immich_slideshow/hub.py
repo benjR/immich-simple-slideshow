@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import random
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,6 +16,10 @@ _LOGGER = logging.getLogger(__name__)
 API_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 MAX_RETRIES = 3
 RETRY_DELAYS = [1, 2, 4]  # Exponential backoff in seconds
+# Max parallel calls when fanning out one-call-per-id (multi-album / multi-person
+# random search). Immich's albumIds/personIds filters are AND-only, so we issue
+# one call per id and combine.
+API_CONCURRENCY_LIMIT = 5
 
 
 class CannotConnect(Exception):
@@ -495,58 +501,80 @@ class ImmichHub:
         _LOGGER.error("All retries failed for get_album_assets %s", album_id)
         return []
 
+    async def _post_search_random(
+        self, body: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """POST /api/search/random with retries. Returns [] on failure."""
+        url = f"{self._host}/api/search/random"
+        for attempt in range(MAX_RETRIES):
+            try:
+                session = await self._get_session()
+                async with session.post(
+                    url, headers=self._headers(), json=body
+                ) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    _LOGGER.warning(
+                        "Failed search/random (attempt %d/%d): %s",
+                        attempt + 1, MAX_RETRIES, response.status,
+                    )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                _LOGGER.warning(
+                    "Error search/random (attempt %d/%d): %s",
+                    attempt + 1, MAX_RETRIES, err,
+                )
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
+        _LOGGER.error("All retries failed for search/random")
+        return []
+
     async def search_random_from_albums(
         self,
         album_ids: list[str],
         count: int = 50,
     ) -> list[dict[str, Any]]:
-        """Search random images from specific albums using search/random API.
+        """Search random images across multiple albums.
 
-        This is more efficient than fetching full album contents when
-        you only need a random sample.
+        Workaround: Immich's `albumIds` filter is AND (intersection), not OR
+        (union). To approximate OR semantics, we issue one call per album in
+        parallel and combine the results.
+
+        For efficiency when count is small relative to len(album_ids), only a
+        random subset of albums is queried (e.g. count=1 → 1 album sampled).
+        Each refill picks a different random subset, so over time exposure
+        across albums stays balanced.
+
+        Each returned asset is tagged with `_album_id` for downstream
+        attribution (used to resolve `album_name` in entity attributes).
 
         Args:
-            album_ids: List of album UUIDs to search within
-            count: Number of random images to fetch
+            album_ids: List of album UUIDs to search within.
+            count: Total number of random images to return.
 
         Returns:
-            List of asset dictionaries.
+            List of asset dicts (size <= count), each tagged with `_album_id`.
         """
-        if not album_ids:
+        if not album_ids or count <= 0:
             return []
 
-        url = f"{self._host}/api/search/random"
-        json_body: dict[str, Any] = {
-            "albumIds": album_ids,
-            "type": "IMAGE",
-            "size": count,
-        }
+        n_to_query = min(count, len(album_ids))
+        selected_ids = random.sample(album_ids, n_to_query)
+        per_id = math.ceil(count / n_to_query)
+        sem = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                session = await self._get_session()
-                async with session.post(
-                    url,
-                    headers=self._headers(),
-                    json=json_body,
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    _LOGGER.warning(
-                        "Failed to search albums (attempt %d/%d): %s",
-                        attempt + 1, MAX_RETRIES, response.status
-                    )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
-                    "Error searching albums (attempt %d/%d): %s",
-                    attempt + 1, MAX_RETRIES, err
+        async def fetch_one(aid: str) -> list[dict[str, Any]]:
+            async with sem:
+                assets = await self._post_search_random(
+                    {"albumIds": [aid], "type": "IMAGE", "size": per_id}
                 )
+            for a in assets:
+                a["_album_id"] = aid
+            return assets
 
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
-
-        _LOGGER.error("All retries failed for search_random_from_albums")
-        return []
+        results = await asyncio.gather(*(fetch_one(aid) for aid in selected_ids))
+        combined = [a for r in results for a in r]
+        random.shuffle(combined)
+        return combined[:count]
 
     async def search_random_in_any_album(
         self,
@@ -601,61 +629,44 @@ class ImmichHub:
         person_ids: list[str],
         count: int = 50,
     ) -> list[dict[str, Any]]:
-        """Search random images containing specific persons.
+        """Search random images containing any of the given persons.
 
-        Note: Immich API has known issues with personIds filter (GitHub #15010).
-        This method attempts API-level filtering first, then falls back to
-        local filtering if needed.
+        Workaround: Immich's `personIds` filter is AND (asset must contain ALL
+        listed persons), not OR. To approximate OR semantics, we issue one call
+        per person in parallel and combine the results.
+
+        For efficiency when count is small relative to len(person_ids), only a
+        random subset of persons is queried (e.g. count=1 → 1 person sampled).
+        Each refill picks a different random subset, so over time exposure
+        across persons stays balanced.
 
         Args:
-            person_ids: List of person UUIDs to search for
-            count: Number of assets to return
+            person_ids: List of person UUIDs to search for.
+            count: Total number of random images to return.
 
         Returns:
-            List of asset dicts containing the specified persons.
+            List of asset dicts (size <= count), each containing at least one
+            of the requested persons.
         """
-        if not person_ids:
+        if not person_ids or count <= 0:
             return []
 
-        url = f"{self._host}/api/search/random"
-        json_body: dict[str, Any] = {
-            "personIds": person_ids,
-            "type": "IMAGE",
-            "size": count,
-            "withPeople": True,
-        }
+        n_to_query = min(count, len(person_ids))
+        selected_ids = random.sample(person_ids, n_to_query)
+        per_id = math.ceil(count / n_to_query)
+        sem = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                session = await self._get_session()
-                async with session.post(
-                    url,
-                    headers=self._headers(),
-                    json=json_body,
-                ) as response:
-                    if response.status == 200:
-                        assets = await response.json()
-                        # Verify results contain the requested persons
-                        # (API may not filter correctly per GitHub #15010)
-                        person_ids_set = set(person_ids)
-                        filtered = []
-                        for asset in assets:
-                            asset_people = {p.get("id") for p in asset.get("people", [])}
-                            if asset_people & person_ids_set:
-                                filtered.append(asset)
-                        return filtered
-                    _LOGGER.warning(
-                        "Failed to search by person (attempt %d/%d): %s",
-                        attempt + 1, MAX_RETRIES, response.status
-                    )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
-                    "Error searching by person (attempt %d/%d): %s",
-                    attempt + 1, MAX_RETRIES, err
+        async def fetch_one(pid: str) -> list[dict[str, Any]]:
+            async with sem:
+                assets = await self._post_search_random(
+                    {"personIds": [pid], "type": "IMAGE", "size": per_id, "withPeople": True}
                 )
+            # Client-side verify: keep only assets that actually contain pid.
+            # The Immich API has had bugs returning unrelated assets in the past
+            # (see GitHub #15010), so this is a defensive filter.
+            return [a for a in assets if any(p.get("id") == pid for p in a.get("people", []))]
 
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
-
-        _LOGGER.error("All retries failed for search_random_by_person")
-        return []
+        results = await asyncio.gather(*(fetch_one(pid) for pid in selected_ids))
+        combined = [a for r in results for a in r]
+        random.shuffle(combined)
+        return combined[:count]
