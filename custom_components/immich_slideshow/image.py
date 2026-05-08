@@ -1254,9 +1254,9 @@ class ImmichSlideshowImage(ImageEntity):
                 except Exception as err:
                     cleanup_errors += 1
                     if cleanup_errors <= 3:  # Log first 3 errors only
-                        _LOGGER.warning("Failed to delete old background %s: %s", old_file.name, err)
+                        _LOGGER.debug("Failed to delete old background %s: %s", old_file.name, err)
             if cleanup_errors > 3:
-                _LOGGER.warning("Failed to delete %d old background files", cleanup_errors)
+                _LOGGER.debug("Failed to delete %d old background files", cleanup_errors)
         except Exception as err:
             _LOGGER.warning("Failed to save VA background: %s", err)
 

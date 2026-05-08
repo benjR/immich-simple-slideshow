@@ -53,7 +53,10 @@ async def async_setup_entry(
     manager = hass.data[DOMAIN].get(f"{config_entry.entry_id}_manager")
 
     if not manager:
-        _LOGGER.warning("Manager not found for sensor setup, will retry")
+        # Race condition: image platform sets up the manager but is loaded in
+        # parallel with sensor. Self-healing — entities update once manager
+        # appears in hass.data on next state read.
+        _LOGGER.debug("Manager not yet ready for sensor setup, will retry")
         # Manager may not be ready yet, sensors will update when it is
         manager = None
 

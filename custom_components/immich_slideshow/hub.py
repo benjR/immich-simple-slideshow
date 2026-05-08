@@ -114,12 +114,12 @@ class ImmichHub:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch random images (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error fetching random images (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err
                 )
@@ -149,7 +149,7 @@ class ImmichHub:
                 session = await self._get_session()
                 async with session.get(url, headers=self._headers()) as response:
                     if response.status != 200:
-                        _LOGGER.warning(
+                        (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                             "Failed to download asset %s (attempt %d/%d): %s",
                             asset_id, attempt + 1, MAX_RETRIES, response.status
                         )
@@ -163,7 +163,7 @@ class ImmichHub:
                             return None
                         return await response.read()
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error downloading asset %s (attempt %d/%d): %s",
                     asset_id, attempt + 1, MAX_RETRIES, err
                 )
@@ -190,7 +190,7 @@ class ImmichHub:
                 session = await self._get_session()
                 async with session.get(url, headers=self._headers()) as response:
                     if response.status != 200:
-                        _LOGGER.warning(
+                        (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                             "Failed to download video %s (attempt %d/%d): %s",
                             asset_id, attempt + 1, MAX_RETRIES, response.status
                         )
@@ -204,7 +204,7 @@ class ImmichHub:
                             return None
                         return await response.read()
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error downloading video %s (attempt %d/%d): %s",
                     asset_id, attempt + 1, MAX_RETRIES, err
                 )
@@ -282,12 +282,12 @@ class ImmichHub:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch memories (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error fetching memories (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err
                 )
@@ -354,12 +354,12 @@ class ImmichHub:
                 async with session.get(url, headers=self._headers()) as response:
                     if response.status == 200:
                         return await response.json()
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch albums (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error fetching albums (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err
                 )
@@ -389,12 +389,12 @@ class ImmichHub:
                         people = data.get("people", [])
                         # Filter to only named persons
                         return [p for p in people if p.get("name")]
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch people (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error fetching people (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err
                 )
@@ -420,7 +420,7 @@ class ImmichHub:
                 async with session.get(url, headers=self._headers()) as response:
                     if response.status == 200:
                         return await response.json()
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch users (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
                     )
@@ -428,7 +428,7 @@ class ImmichHub:
                         # Permission missing — no point retrying
                         return []
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error fetching users (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err
                 )
@@ -485,12 +485,12 @@ class ImmichHub:
                     if response.status == 404:
                         _LOGGER.warning("Album %s not found", album_id)
                         return []
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch album %s (attempt %d/%d): %s",
                         album_id, attempt + 1, MAX_RETRIES, response.status
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error fetching album %s (attempt %d/%d): %s",
                     album_id, attempt + 1, MAX_RETRIES, err
                 )
@@ -514,12 +514,12 @@ class ImmichHub:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed search/random (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status,
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error search/random (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err,
                 )
@@ -608,12 +608,12 @@ class ImmichHub:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
-                    _LOGGER.warning(
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to search any album (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                _LOGGER.warning(
+                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error searching any album (attempt %d/%d): %s",
                     attempt + 1, MAX_RETRIES, err
                 )
