@@ -1,0 +1,19 @@
+{
+  "options": {
+    "step": {
+      "init": {
+        "sections": {
+          "connection": "mdi:server-network",
+          "recent_source": "mdi:clock-outline",
+          "memories_source": "mdi:calendar-heart",
+          "albums_source": "mdi:folder-multiple-image",
+          "persons_source": "mdi:account-group",
+          "exclusions": "mdi:filter-remove",
+          "display": "mdi:monitor",
+          "file_output": "mdi:file-export",
+          "source_weights": "mdi:scale-balance"
+        }
+      }
+    }
+  }
+}

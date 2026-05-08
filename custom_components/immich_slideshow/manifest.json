@@ -8,5 +8,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/benjR/immich-simple-slideshow/issues",
   "requirements": ["Pillow>=10.0.0"],
-  "version": "1.0.0"
+  "version": "2.0.0-beta.1"
 }

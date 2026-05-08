@@ -4,9 +4,8 @@
 .env.*
 *.local
 
-# Dev notes
-ROADMAP.md
-DEVELOPMENT.md
+# Dev notes (architecture sketches, roadmaps, dev workflows)
+docs/
 
 # Test stack (local dev environment)
 test-stack/

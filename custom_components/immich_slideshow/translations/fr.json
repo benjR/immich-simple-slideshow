@@ -13,38 +13,75 @@
       },
       "api_key": {
         "title": "Immich Simple Slideshow - Clé API",
-        "description": "Créez une clé API dans Immich : [{api_keys_url}]({api_keys_url})\n\nPermissions requises : **asset.read**, **asset.download**, **memory.read**",
+        "description": "Créez une clé API dans Immich : [{api_keys_url}]({api_keys_url})\n\nPermissions requises : **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**",
         "data": {
-          "api_key": "Clé API",
-          "days": "Photos récentes (jours)",
-          "mix_ratio": "Mix Récentes / Souvenirs",
-          "memory_years": "Limite années souvenirs",
-          "dual_portrait": "Afficher 2 portraits côte à côte",
-          "favorites_filter": "Filtre favoris",
-          "resolutions": "Résolutions cibles",
-          "refresh_interval": "Intervalle de rafraîchissement (secondes)",
-          "write_files": "Écrire les fichiers pour View Assist",
-          "background_path": "Chemin de sortie arrière-plan"
+          "api_key": "Clé API"
         },
         "data_description": {
-          "api_key": "Collez la clé API créée dans Immich",
-          "days": "Photos des N derniers jours (0 = illimité)",
-          "mix_ratio": "0% = récentes uniquement, 100% = souvenirs uniquement",
-          "memory_years": "Années max pour les souvenirs (0 = illimité)",
-          "dual_portrait": "Combiner deux photos portrait côte à côte",
-          "favorites_filter": "Tous = pas de filtre, Favoris uniquement, Exclure favoris",
-          "resolutions": "Résolution cible (ex: 1920x1080)",
-          "refresh_interval": "Fréquence de changement de photo (10-3600s). Si View Assist, doit correspondre à son intervalle de rotation",
-          "write_files": "Activer pour écrire les fichiers image sur disque (requis pour le mode local_random de View Assist)",
-          "background_path": "Chemin relatif sous /config (ex: view_assist/images/backgrounds)"
+          "api_key": "Collez la clé API créée dans Immich"
+        }
+      },
+      "settings": {
+        "title": "Immich Slideshow - Paramètres",
+        "description": "**Mélangez plusieurs sources de photos** en définissant des poids pour chacune. Les photos seront sélectionnées aléatoirement selon les poids relatifs. Mettez le poids à 0 pour désactiver une source. Tout est modifiable plus tard via Configurer.",
+        "sections": {
+          "recent_source": {
+            "name": "Photos récentes — N derniers jours",
+            "data": {
+              "recent_days": "Jours en arrière (0 = illimité)",
+              "recent_favorites_filter": "Filtre favoris"
+            }
+          },
+          "memories_source": {
+            "name": "Souvenirs — « Ce jour-là »",
+            "data": {
+              "memories_max_years": "Années max (0 = illimité)"
+            }
+          },
+          "albums_source": {
+            "name": "Albums — depuis les albums",
+            "description": "Laissez vide pour inclure les photos de tous les albums",
+            "data": {
+              "albums_include": "Albums spécifiques (optionnel)"
+            }
+          },
+          "persons_source": {
+            "name": "Personnes — personnes spécifiques",
+            "data": {
+              "persons_include": "Inclure les personnes"
+            }
+          },
+          "source_weights": {
+            "name": "Poids des sources (0 = désactivé)",
+            "data": {
+              "source_recent_weight": "Photos récentes",
+              "source_memories_weight": "Souvenirs",
+              "source_albums_weight": "Albums",
+              "source_persons_weight": "Personnes"
+            }
+          },
+          "advanced": {
+            "name": "Paramètres avancés",
+            "data": {
+              "exclude_albums": "Exclusions — Albums",
+              "exclude_persons": "Exclusions — Personnes",
+              "resolutions": "Affichage — Résolutions",
+              "refresh_interval": "Affichage — Intervalle (secondes)",
+              "dual_portrait": "Affichage — Double portrait",
+              "write_files": "View Assist — Écrire les fichiers",
+              "background_path": "View Assist — Chemin de sortie"
+            }
+          }
         }
       }
     },
     "error": {
       "cannot_connect": "Impossible de se connecter à Immich",
       "invalid_auth": "Clé API invalide",
-      "invalid_resolutions": "Format de résolution invalide. Utilisez LxH (ex: 1920x1080)",
+      "invalid_resolutions": "Format de résolution invalide. Utilisez LxH (ex: 1920x1080). Plage: 640-3840 x 480-2160",
       "invalid_path": "Chemin invalide. Doit être relatif et ne peut pas contenir '..'",
+      "no_sources_enabled": "Au moins une source doit avoir un poids supérieur à 0",
+      "persons_source_no_selection": "La source Personnes est activée mais aucune personne n'est sélectionnée",
       "unknown": "Erreur inattendue"
     },
     "abort": {
@@ -54,31 +91,79 @@
   "options": {
     "step": {
       "init": {
-        "title": "Options Immich Simple Slideshow",
+        "title": "Paramètres du diaporama Immich",
+        "description": "**Mélangez plusieurs sources de photos** en définissant des poids pour chacune. Les photos seront sélectionnées aléatoirement selon les poids relatifs. Mettez le poids à 0 pour désactiver une source.",
         "data": {
           "host": "URL Immich",
-          "api_key": "Clé API",
-          "days": "Photos récentes (jours)",
-          "mix_ratio": "Mix Récentes / Souvenirs",
-          "memory_years": "Limite années souvenirs",
-          "dual_portrait": "Afficher 2 portraits côte à côte",
-          "favorites_filter": "Filtre favoris",
-          "resolutions": "Résolutions cibles",
-          "refresh_interval": "Intervalle de rafraîchissement (secondes)",
-          "write_files": "Écrire les fichiers pour View Assist",
-          "background_path": "Chemin de sortie arrière-plan"
+          "api_key": "Clé API"
         },
         "data_description": {
-          "host": "URL complète de votre instance Immich. [Créer une clé API]({api_keys_url})",
-          "api_key": "Laisser inchangé pour garder la clé actuelle. Permissions : **asset.read**, **asset.download**, **memory.read**",
-          "days": "Photos des N derniers jours (0 = illimité)",
-          "mix_ratio": "0% = récentes uniquement, 100% = souvenirs uniquement",
-          "memory_years": "Années max pour les souvenirs (0 = illimité)",
-          "favorites_filter": "Tous = pas de filtre, Favoris uniquement, Exclure favoris",
-          "resolutions": "Résolution cible (ex: 1920x1080)",
-          "write_files": "Activer pour écrire les fichiers image sur disque (requis pour le mode local_random de View Assist)",
-          "background_path": "Chemin relatif sous /config (ex: view_assist/images/backgrounds)"
+          "api_key": "Permissions requises : **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**. Gérer les clés : [{api_keys_url}]({api_keys_url})"
+        },
+        "sections": {
+          "recent_source": {
+            "name": "Photos récentes — N derniers jours",
+            "data": {
+              "recent_days": "Jours en arrière (0 = illimité)",
+              "recent_favorites_filter": "Filtre favoris"
+            }
+          },
+          "memories_source": {
+            "name": "Souvenirs — « Ce jour-là »",
+            "data": {
+              "memories_max_years": "Années max (0 = illimité)"
+            }
+          },
+          "albums_source": {
+            "name": "Albums — depuis les albums",
+            "description": "Laissez vide pour inclure les photos de tous les albums",
+            "data": {
+              "albums_include": "Albums spécifiques (optionnel)"
+            }
+          },
+          "persons_source": {
+            "name": "Personnes — personnes spécifiques",
+            "data": {
+              "persons_include": "Inclure les personnes"
+            }
+          },
+          "source_weights": {
+            "name": "Poids des sources (0 = désactivé)",
+            "data": {
+              "source_recent_weight": "Photos récentes",
+              "source_memories_weight": "Souvenirs",
+              "source_albums_weight": "Albums",
+              "source_persons_weight": "Personnes"
+            }
+          },
+          "advanced": {
+            "name": "Paramètres avancés",
+            "data": {
+              "exclude_albums": "Exclusions — Albums",
+              "exclude_persons": "Exclusions — Personnes",
+              "resolutions": "Affichage — Résolutions",
+              "refresh_interval": "Affichage — Intervalle (secondes)",
+              "dual_portrait": "Affichage — Double portrait",
+              "write_files": "View Assist — Écrire les fichiers",
+              "background_path": "View Assist — Chemin de sortie"
+            }
+          }
         }
+      }
+    },
+    "error": {
+      "invalid_resolutions": "Format de résolution invalide. Utilisez LxH (ex: 1920x1080)",
+      "invalid_path": "Chemin invalide. Doit être relatif et ne peut pas contenir '..'",
+      "no_sources_enabled": "Au moins une source doit avoir un poids supérieur à 0",
+      "persons_source_no_selection": "La source Personnes est activée mais aucune personne n'est sélectionnée"
+    }
+  },
+  "selector": {
+    "recent_favorites_filter": {
+      "options": {
+        "all": "Toutes les photos",
+        "only": "Favoris uniquement",
+        "exclude": "Exclure les favoris"
       }
     }
   }

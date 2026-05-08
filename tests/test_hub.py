@@ -469,3 +469,489 @@ async def test_close_session_multiple_times() -> None:
     # Close multiple times should not raise
     await hub.close()
     await hub.close()
+
+
+# =============================================================================
+# Get Albums Tests
+# =============================================================================
+
+
+async def test_get_albums_success() -> None:
+    """Test successful albums retrieval."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    mock_albums = [
+        {"id": "album-1", "albumName": "Vacation 2024", "assetCount": 50},
+        {"id": "album-2", "albumName": "Family", "assetCount": 100},
+    ]
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/albums",
+            payload=mock_albums,
+        )
+
+        result = await hub.get_albums()
+        assert len(result) == 2
+        assert result[0]["id"] == "album-1"
+        assert result[0]["albumName"] == "Vacation 2024"
+        assert result[1]["assetCount"] == 100
+
+    await hub.close()
+
+
+async def test_get_albums_empty() -> None:
+    """Test albums retrieval with no albums."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/albums",
+            payload=[],
+        )
+
+        result = await hub.get_albums()
+        assert result == []
+
+    await hub.close()
+
+
+async def test_get_albums_server_error() -> None:
+    """Test albums retrieval with server error returns empty list after retries."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        # Mock 3 failures (MAX_RETRIES)
+        mock.get(f"{MOCK_HOST}/api/albums", status=500)
+        mock.get(f"{MOCK_HOST}/api/albums", status=500)
+        mock.get(f"{MOCK_HOST}/api/albums", status=500)
+
+        result = await hub.get_albums()
+        assert result == []
+
+    await hub.close()
+
+
+# =============================================================================
+# Get People Tests
+# =============================================================================
+
+
+async def test_get_people_success() -> None:
+    """Test successful people retrieval returns named persons only."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    mock_response = {
+        "people": [
+            {"id": "person-1", "name": "Alice", "thumbnailPath": "/thumb/1"},
+            {"id": "person-2", "name": "Bob", "thumbnailPath": "/thumb/2"},
+        ],
+        "total": 2,
+    }
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/people",
+            payload=mock_response,
+        )
+
+        result = await hub.get_people()
+        assert len(result) == 2
+        assert result[0]["name"] == "Alice"
+        assert result[1]["name"] == "Bob"
+
+    await hub.close()
+
+
+async def test_get_people_filters_unnamed() -> None:
+    """Test that people without names are filtered out."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    mock_response = {
+        "people": [
+            {"id": "person-1", "name": "Alice", "thumbnailPath": "/thumb/1"},
+            {"id": "person-2", "name": "", "thumbnailPath": "/thumb/2"},  # Empty name
+            {"id": "person-3", "thumbnailPath": "/thumb/3"},  # No name field
+            {"id": "person-4", "name": None, "thumbnailPath": "/thumb/4"},  # None name
+            {"id": "person-5", "name": "Charlie", "thumbnailPath": "/thumb/5"},
+        ],
+        "total": 5,
+    }
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/people",
+            payload=mock_response,
+        )
+
+        result = await hub.get_people()
+        assert len(result) == 2
+        assert result[0]["name"] == "Alice"
+        assert result[1]["name"] == "Charlie"
+
+    await hub.close()
+
+
+async def test_get_people_empty() -> None:
+    """Test people retrieval with no people."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    mock_response = {
+        "people": [],
+        "total": 0,
+    }
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/people",
+            payload=mock_response,
+        )
+
+        result = await hub.get_people()
+        assert result == []
+
+    await hub.close()
+
+
+async def test_get_people_server_error() -> None:
+    """Test people retrieval with server error returns empty list after retries."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        # Mock 3 failures (MAX_RETRIES)
+        mock.get(f"{MOCK_HOST}/api/people", status=500)
+        mock.get(f"{MOCK_HOST}/api/people", status=500)
+        mock.get(f"{MOCK_HOST}/api/people", status=500)
+
+        result = await hub.get_people()
+        assert result == []
+
+    await hub.close()
+
+
+# =============================================================================
+# Get Album Assets Tests
+# =============================================================================
+
+
+async def test_get_album_assets_success() -> None:
+    """Test successful album assets retrieval."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_id = "album-123"
+
+    mock_album = {
+        "id": album_id,
+        "albumName": "Test Album",
+        "assets": [
+            {"id": "asset-1", "type": "IMAGE"},
+            {"id": "asset-2", "type": "IMAGE"},
+        ],
+    }
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/albums/{album_id}",
+            payload=mock_album,
+        )
+
+        result = await hub.get_album_assets(album_id)
+        assert len(result) == 2
+        assert result[0]["id"] == "asset-1"
+        assert result[1]["id"] == "asset-2"
+
+    await hub.close()
+
+
+async def test_get_album_assets_filters_videos() -> None:
+    """Test that album assets filters out videos, only returns images."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_id = "album-123"
+
+    mock_album = {
+        "id": album_id,
+        "albumName": "Mixed Album",
+        "assets": [
+            {"id": "image-1", "type": "IMAGE"},
+            {"id": "video-1", "type": "VIDEO"},
+            {"id": "image-2", "type": "IMAGE"},
+            {"id": "video-2", "type": "VIDEO"},
+        ],
+    }
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/albums/{album_id}",
+            payload=mock_album,
+        )
+
+        result = await hub.get_album_assets(album_id)
+        assert len(result) == 2
+        assert all(a["type"] == "IMAGE" for a in result)
+        assert result[0]["id"] == "image-1"
+        assert result[1]["id"] == "image-2"
+
+    await hub.close()
+
+
+async def test_get_album_assets_not_found_404() -> None:
+    """Test album assets returns empty on 404."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_id = "nonexistent-album"
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/albums/{album_id}",
+            status=404,
+        )
+
+        result = await hub.get_album_assets(album_id)
+        assert result == []
+
+    await hub.close()
+
+
+async def test_get_album_assets_server_error() -> None:
+    """Test album assets returns empty after retries on server error."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_id = "album-123"
+
+    with aioresponses() as mock:
+        # Mock 3 failures (MAX_RETRIES)
+        mock.get(f"{MOCK_HOST}/api/albums/{album_id}", status=500)
+        mock.get(f"{MOCK_HOST}/api/albums/{album_id}", status=500)
+        mock.get(f"{MOCK_HOST}/api/albums/{album_id}", status=500)
+
+        result = await hub.get_album_assets(album_id)
+        assert result == []
+
+    await hub.close()
+
+
+# =============================================================================
+# Search Random From Albums Tests
+# =============================================================================
+
+
+async def test_search_random_from_albums_success() -> None:
+    """Test successful random search from specific albums."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_ids = ["album-1", "album-2"]
+
+    mock_assets = [
+        {"id": "asset-1", "type": "IMAGE"},
+        {"id": "asset-2", "type": "IMAGE"},
+        {"id": "asset-3", "type": "IMAGE"},
+    ]
+
+    with aioresponses() as mock:
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=mock_assets,
+        )
+
+        result = await hub.search_random_from_albums(album_ids, count=10)
+        assert len(result) == 3
+        assert result[0]["id"] == "asset-1"
+
+    await hub.close()
+
+
+async def test_search_random_from_albums_empty_album_ids() -> None:
+    """Test random search with empty album_ids returns empty."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    # No mock needed - should return early
+    result = await hub.search_random_from_albums([], count=10)
+    assert result == []
+
+    await hub.close()
+
+
+async def test_search_random_from_albums_server_error() -> None:
+    """Test random search from albums returns empty after retries on server error."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    album_ids = ["album-1"]
+
+    with aioresponses() as mock:
+        # Mock 3 failures (MAX_RETRIES)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+
+        result = await hub.search_random_from_albums(album_ids, count=10)
+        assert result == []
+
+    await hub.close()
+
+
+# =============================================================================
+# Search Random In Any Album Tests
+# =============================================================================
+
+
+async def test_search_random_in_any_album_success() -> None:
+    """Test successful random search in any album."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    mock_assets = [
+        {"id": "asset-1", "type": "IMAGE"},
+        {"id": "asset-2", "type": "IMAGE"},
+    ]
+
+    with aioresponses() as mock:
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=mock_assets,
+        )
+
+        result = await hub.search_random_in_any_album(count=10)
+        assert len(result) == 2
+        assert result[0]["id"] == "asset-1"
+
+    await hub.close()
+
+
+async def test_search_random_in_any_album_empty_results() -> None:
+    """Test random search in any album with no results."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=[],
+        )
+
+        result = await hub.search_random_in_any_album(count=10)
+        assert result == []
+
+    await hub.close()
+
+
+async def test_search_random_in_any_album_server_error() -> None:
+    """Test random search in any album returns empty after retries on server error."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        # Mock 3 failures (MAX_RETRIES)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+
+        result = await hub.search_random_in_any_album(count=10)
+        assert result == []
+
+    await hub.close()
+
+
+# =============================================================================
+# Search Random By Person Tests
+# =============================================================================
+
+
+async def test_search_random_by_person_success() -> None:
+    """Test successful random search by person."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    person_ids = ["person-1"]
+
+    mock_assets = [
+        {
+            "id": "asset-1",
+            "type": "IMAGE",
+            "people": [{"id": "person-1", "name": "Alice"}],
+        },
+        {
+            "id": "asset-2",
+            "type": "IMAGE",
+            "people": [{"id": "person-1", "name": "Alice"}, {"id": "person-2", "name": "Bob"}],
+        },
+    ]
+
+    with aioresponses() as mock:
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=mock_assets,
+        )
+
+        result = await hub.search_random_by_person(person_ids, count=10)
+        assert len(result) == 2
+        assert result[0]["id"] == "asset-1"
+        assert result[1]["id"] == "asset-2"
+
+    await hub.close()
+
+
+async def test_search_random_by_person_filters_api_bug() -> None:
+    """Test that local filtering works to fix Immich API bug (GitHub #15010).
+
+    The Immich API may return assets that don't actually contain the requested
+    person. This test verifies the hub correctly filters out those results.
+    """
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    person_ids = ["person-1"]
+
+    # API returns assets with wrong people (simulating the bug)
+    mock_assets = [
+        {
+            "id": "asset-correct",
+            "type": "IMAGE",
+            "people": [{"id": "person-1", "name": "Alice"}],
+        },
+        {
+            "id": "asset-wrong",
+            "type": "IMAGE",
+            "people": [{"id": "person-2", "name": "Bob"}],  # Wrong person!
+        },
+        {
+            "id": "asset-no-people",
+            "type": "IMAGE",
+            "people": [],  # No people at all
+        },
+        {
+            "id": "asset-also-correct",
+            "type": "IMAGE",
+            "people": [{"id": "person-1", "name": "Alice"}, {"id": "person-3", "name": "Charlie"}],
+        },
+    ]
+
+    with aioresponses() as mock:
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=mock_assets,
+        )
+
+        result = await hub.search_random_by_person(person_ids, count=10)
+
+        # Should only include assets with person-1
+        assert len(result) == 2
+        assert result[0]["id"] == "asset-correct"
+        assert result[1]["id"] == "asset-also-correct"
+
+    await hub.close()
+
+
+async def test_search_random_by_person_empty_person_ids() -> None:
+    """Test random search with empty person_ids returns empty."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    # No mock needed - should return early
+    result = await hub.search_random_by_person([], count=10)
+    assert result == []
+
+    await hub.close()
+
+
+async def test_search_random_by_person_server_error() -> None:
+    """Test random search by person returns empty after retries on server error."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    person_ids = ["person-1"]
+
+    with aioresponses() as mock:
+        # Mock 3 failures (MAX_RETRIES)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
+
+        result = await hub.search_random_by_person(person_ids, count=10)
+        assert result == []
+
+    await hub.close()

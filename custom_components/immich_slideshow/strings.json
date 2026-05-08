@@ -13,30 +13,65 @@
       },
       "api_key": {
         "title": "Immich Simple Slideshow - API Key",
-        "description": "Create an API key in Immich: [{api_keys_url}]({api_keys_url})\n\nRequired permissions: **asset.read**, **asset.download**, **memory.read**",
+        "description": "Create an API key in Immich: [{api_keys_url}]({api_keys_url})\n\nRequired permissions: **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**",
         "data": {
-          "api_key": "API Key",
-          "days": "Recent photos (days)",
-          "mix_ratio": "Memories mix",
-          "memory_years": "Memory years limit",
-          "dual_portrait": "Display 2 portraits side by side",
-          "favorites_filter": "Favorites filter",
-          "resolutions": "Target resolutions",
-          "refresh_interval": "Refresh interval (seconds)",
-          "write_files": "Write files for View Assist",
-          "background_path": "Background output path"
+          "api_key": "API Key"
         },
         "data_description": {
-          "api_key": "Paste the API key you created in Immich",
-          "days": "Show recent photos from the last N days (0 to disable recent photos)",
-          "mix_ratio": "Percentage of 'On This Day' memories in the slideshow (0% = recent only, 100% = memories only)",
-          "memory_years": "How many years back to look for memories (0 = unlimited)",
-          "dual_portrait": "When a portrait photo is selected, find another portrait and display them side by side",
-          "favorites_filter": "Filter photos by favorite status: All (no filter), Favorites only, or Exclude favorites",
-          "resolutions": "Target resolution for the slideshow (e.g., 1920x1080)",
-          "refresh_interval": "How often to change the photo (10-3600 seconds)",
-          "write_files": "Enable to write image files to disk (required for View Assist local_random mode)",
-          "background_path": "Relative path under /config where images are saved (e.g., view_assist/images/backgrounds)"
+          "api_key": "Paste the API key you created in Immich"
+        }
+      },
+      "settings": {
+        "title": "Immich Slideshow - Settings",
+        "description": "**Mix multiple photo sources** by setting weights for each below. Photos will be randomly selected from enabled sources based on their relative weights. Set weight to 0 to disable a source. You can change all of these later from Configure.",
+        "sections": {
+          "recent_source": {
+            "name": "Recent Photos — last N days",
+            "data": {
+              "recent_days": "Days to look back (0 = unlimited)",
+              "recent_favorites_filter": "Favorites filter"
+            }
+          },
+          "memories_source": {
+            "name": "Memories — 'On This Day' photos",
+            "data": {
+              "memories_max_years": "Max years back (0 = unlimited)"
+            }
+          },
+          "albums_source": {
+            "name": "Albums — from albums",
+            "description": "Leave empty to include photos from any album",
+            "data": {
+              "albums_include": "Include specific albums (optional)"
+            }
+          },
+          "persons_source": {
+            "name": "Persons — specific people",
+            "data": {
+              "persons_include": "Include persons"
+            }
+          },
+          "source_weights": {
+            "name": "Source Weights (0 = disabled)",
+            "data": {
+              "source_recent_weight": "Recent photos",
+              "source_memories_weight": "Memories",
+              "source_albums_weight": "Albums",
+              "source_persons_weight": "Persons"
+            }
+          },
+          "advanced": {
+            "name": "Advanced Settings",
+            "data": {
+              "exclude_albums": "Exclusions — Albums",
+              "exclude_persons": "Exclusions — Persons",
+              "resolutions": "Display — Resolutions",
+              "refresh_interval": "Display — Interval (seconds)",
+              "dual_portrait": "Display — Dual portrait",
+              "write_files": "View Assist — Write files",
+              "background_path": "View Assist — Output path"
+            }
+          }
         }
       }
     },
@@ -45,6 +80,8 @@
       "invalid_auth": "Invalid API key",
       "invalid_resolutions": "Invalid resolution format. Use WxH (e.g., 1920x1080). Range: 640-3840 x 480-2160",
       "invalid_path": "Invalid path. Must be relative and cannot contain '..'",
+      "no_sources_enabled": "At least one source must have a weight greater than 0",
+      "persons_source_no_selection": "Persons source is enabled but no persons are selected",
       "unknown": "Unexpected error"
     },
     "abort": {
@@ -54,31 +91,79 @@
   "options": {
     "step": {
       "init": {
-        "title": "Immich Simple Slideshow Options",
+        "title": "Immich Slideshow Settings",
+        "description": "**Mix multiple photo sources** by setting weights for each below. Photos will be randomly selected from enabled sources based on their relative weights. Set weight to 0 to disable a source.",
         "data": {
           "host": "Immich URL",
-          "api_key": "API Key",
-          "days": "Recent photos (days)",
-          "mix_ratio": "Memories mix",
-          "memory_years": "Memory years limit",
-          "dual_portrait": "Display 2 portraits side by side",
-          "favorites_filter": "Favorites filter",
-          "resolutions": "Target resolutions",
-          "refresh_interval": "Refresh interval (seconds)",
-          "write_files": "Write files for View Assist",
-          "background_path": "Background output path"
+          "api_key": "API Key"
         },
         "data_description": {
-          "host": "Full URL to your Immich instance. [Create API key]({api_keys_url})",
-          "api_key": "Leave unchanged to keep current key. Permissions: **asset.read**, **asset.download**, **memory.read**",
-          "days": "Show recent photos from the last N days (0 to disable recent photos)",
-          "mix_ratio": "Percentage of 'On This Day' memories in the slideshow (0% = recent only, 100% = memories only)",
-          "memory_years": "How many years back to look for memories (0 = unlimited)",
-          "favorites_filter": "Filter photos by favorite status: All (no filter), Favorites only, or Exclude favorites",
-          "resolutions": "Target resolution for the slideshow (e.g., 1920x1080)",
-          "write_files": "Enable to write image files to disk (required for View Assist local_random mode)",
-          "background_path": "Relative path under /config where images are saved (e.g., view_assist/images/backgrounds)"
+          "api_key": "Required permissions: **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**. Manage keys: [{api_keys_url}]({api_keys_url})"
+        },
+        "sections": {
+          "recent_source": {
+            "name": "Recent Photos — last N days",
+            "data": {
+              "recent_days": "Days to look back (0 = unlimited)",
+              "recent_favorites_filter": "Favorites filter"
+            }
+          },
+          "memories_source": {
+            "name": "Memories — 'On This Day' photos",
+            "data": {
+              "memories_max_years": "Max years back (0 = unlimited)"
+            }
+          },
+          "albums_source": {
+            "name": "Albums — from albums",
+            "description": "Leave empty to include photos from any album",
+            "data": {
+              "albums_include": "Include specific albums (optional)"
+            }
+          },
+          "persons_source": {
+            "name": "Persons — specific people",
+            "data": {
+              "persons_include": "Include persons"
+            }
+          },
+          "source_weights": {
+            "name": "Source Weights (0 = disabled)",
+            "data": {
+              "source_recent_weight": "Recent photos",
+              "source_memories_weight": "Memories",
+              "source_albums_weight": "Albums",
+              "source_persons_weight": "Persons"
+            }
+          },
+          "advanced": {
+            "name": "Advanced Settings",
+            "data": {
+              "exclude_albums": "Exclusions — Albums",
+              "exclude_persons": "Exclusions — Persons",
+              "resolutions": "Display — Resolutions",
+              "refresh_interval": "Display — Interval (seconds)",
+              "dual_portrait": "Display — Dual portrait",
+              "write_files": "View Assist — Write files",
+              "background_path": "View Assist — Output path"
+            }
+          }
         }
+      }
+    },
+    "error": {
+      "invalid_resolutions": "Invalid resolution format. Use WxH (e.g., 1920x1080)",
+      "invalid_path": "Invalid path. Must be relative and cannot contain '..'",
+      "no_sources_enabled": "At least one source must have a weight greater than 0",
+      "persons_source_no_selection": "Persons source is enabled but no persons are selected"
+    }
+  },
+  "selector": {
+    "recent_favorites_filter": {
+      "options": {
+        "all": "All photos",
+        "only": "Favorites only",
+        "exclude": "Exclude favorites"
       }
     }
   }
