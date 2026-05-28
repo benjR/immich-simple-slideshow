@@ -4,19 +4,19 @@
 [![GitHub Release](https://img.shields.io/github/v/release/benjR/immich-simple-slideshow)](https://github.com/benjR/immich-simple-slideshow/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> ⚠️ **Warning:** This project was vibecoded. While it works for my use case, expect rough edges, potential bugs, and code that might make experienced developers cry. Use at your own risk, PRs welcome!
-
-A Home Assistant custom integration for displaying photos from your [Immich](https://immich.app/) library as a slideshow, with support for "On This Day" memories.
+A Home Assistant custom integration for displaying photos from your [Immich](https://immich.app/) library as a slideshow.
 
 Forked from [outadoc/immich-home-assistant](https://github.com/outadoc/immich-home-assistant).
 
 ## Features
 
-- **Memories** — "On This Day" photos from previous years
-- **Mix ratio** — Blend memories with recent photos (0-100%)
-- **Dual portrait** — Combine two portraits side-by-side for landscape displays
-- **No repeats** — Pool-based rotation instead of random
-- **Configurable** — Resolution, refresh interval, favorites filter
+- **Multiple sources** - Recent photos, "On This Day" memories, albums, persons - each with configurable weight
+- **Pool system** - Pre-fetches 100 photos, serves them without repetition, auto-refills in background
+- **Prefetch** - Next image is downloaded and resized while the current one is displayed
+- **Dual portrait** - Two portrait photos side by side on landscape displays
+- **Album & person filters** - Include/exclude specific albums or people from the config flow
+- **View Assist support** - Writes images to disk for use as VA backgrounds
+- **3 sensors** - Pool size, current source, prefetch status
 
 ## Installation
 
@@ -39,22 +39,40 @@ Forked from [outadoc/immich-home-assistant](https://github.com/outadoc/immich-ho
 
 ## Configuration Options
 
+### Source weights
+
+Each source has a weight (0-100). Set to 0 to disable. Weights are relative to each other - if recent=50 and memories=50, you get ~50/50. If recent=80 and albums=20, you get ~80/20.
+
+| Source | Default | Description |
+|--------|---------|-------------|
+| Recent | 50 | Photos from the last N days |
+| Memories | 50 | "On This Day" photos from previous years |
+| Albums | 0 | Photos from selected albums |
+| Persons | 0 | Photos containing selected people |
+
+### Other options
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| Mix Ratio | 0% | Percentage of memories in the photo pool |
-| Days | 90 | How far back to look for "recent" photos (0 = unlimited) |
-| Memory Years | 0 | Max years back for memories (0 = unlimited) |
-| Dual Portrait | Yes | Combine two portraits side-by-side |
-| Resolution | 1920x1080 | Output resolution |
-| Refresh Interval | 30s | Time between photo changes |
+| Recent days | 90 | How far back for recent photos (0 = all time) |
+| Favorites filter | All | All photos, favorites only, or exclude favorites |
+| Memory years | 0 | Max years back for memories (0 = unlimited) |
+| Albums include | - | Select specific albums (empty = all) |
+| Persons include | - | Select specific people |
+| Exclude albums | - | Albums to exclude from all sources |
+| Exclude persons | - | People to exclude from all sources |
+| Dual portrait | Yes | Combine two portraits side by side |
+| Resolution | 1920x1080 | Output resolution (supports multiple, comma-separated) |
+| Refresh interval | 30s | Time between photo changes |
+| Write files | No | Save images to disk (for View Assist) |
 
 ## Usage
 
-### As a Fullscreen Background
+### As a fullscreen background
 
-#### Option 1: Wallpanel (Recommended)
+#### Wallpanel (recommended)
 
-[Wallpanel](https://github.com/j-a-n/lovelace-wallpanel) is a HACS integration that provides fullscreen backgrounds for any Lovelace view:
+[Wallpanel](https://github.com/j-a-n/lovelace-wallpanel) provides fullscreen backgrounds for any Lovelace view:
 
 ```yaml
 wallpanel:
@@ -62,9 +80,9 @@ wallpanel:
   image_url: /api/image_proxy/image.immich_slideshow
 ```
 
-#### Option 2: card-mod
+#### card-mod
 
-Add this card to your view (requires [card-mod](https://github.com/thomasloven/lovelace-card-mod)). Works best with masonry views:
+Requires [card-mod](https://github.com/thomasloven/lovelace-card-mod):
 
 ```yaml
 type: picture-entity
@@ -92,72 +110,53 @@ card_mod:
     }
 ```
 
-### As a Standard Image Entity
-
-The integration creates a standard Home Assistant `image` entity that works with any Lovelace card:
-
-```yaml
-type: picture-entity
-entity: image.immich_slideshow
-show_state: false
-show_name: false
-```
-
 ### With View Assist
 
-To use Immich Simple Slideshow as a background in [View Assist](https://github.com/msp1974/ViewAssist_Companion_App) dashboards:
-
-1. **Enable file writing** in the integration options: check "Write files to disk"
-2. **In View Assist settings**, configure the background:
+1. Enable "Write files to disk" in the integration options
+2. In View Assist settings:
    - **Background image source**: `Random image from local file path`
    - **Image path or url**: `backgrounds`
 
-The integration saves images to `/config/view_assist/images/backgrounds/` by default (customizable in "Background Output Path").
+Images are saved to `/config/view_assist/images/backgrounds/` by default.
 
-### Entity Attributes
+### Entity attributes
 
-The image entity exposes these attributes for use in cards/automations:
+The image entity exposes these attributes (suffixed `_1`, and `_2` when dual portrait):
 
 | Attribute | Description |
 |-----------|-------------|
 | `is_dual_portrait` | Whether showing two photos |
-| `asset_id_1` | Immich asset ID |
-| `immich_url_1` | Direct link to photo in Immich |
-| `original_filename_1` | Original file name |
-| `date_taken_1` | When the photo was taken |
-| `memory_year_1` | Year of the memory (if memory photo) |
-| `years_ago_1` | How many years ago (if memory photo) |
-| `city_1` / `country_1` | Location info |
-| `people_1` | List of recognized people |
-| `source_1` | `memory` or `recent` |
-| `is_favorite_1` | Favorite status in Immich |
+| `asset_id` | Immich asset ID |
+| `immich_url` | Direct link to photo in Immich |
+| `original_filename` | Original file name |
+| `date_taken` | When the photo was taken |
+| `source` | `recent`, `memory`, `album`, or `person` |
+| `album_name` | Album name (if from album source) |
+| `owner_name` | Photo owner (for shared libraries) |
+| `memory_year` | Year of the memory |
+| `years_ago` | How many years ago |
+| `city` / `country` | Location info |
+| `people` | Recognized people in the photo |
+| `is_favorite` | Favorite status in Immich |
+| `has_live_photo` | Whether the photo has a Live Photo video |
 
-When `is_dual_portrait` is true, `_2` attributes are also available for the second photo.
+### Sensors
 
-Example usage:
+| Entity | Description |
+|--------|-------------|
+| `sensor.immich_slideshow_pool_size` | Number of photos ready in the pool |
+| `sensor.immich_slideshow_current_source` | Source of the currently displayed photo |
+| `sensor.immich_slideshow_prefetch_status` | Prefetch state (idle, fetching, ready) |
 
-```yaml
-type: custom:button-card
-entity: image.immich_slideshow
-custom_fields:
-  info: |
-    [[[
-      const a = entity.attributes;
-      if (a.is_dual_portrait) {
-        return (a.city_1 || '') + ' / ' + (a.city_2 || '');
-      }
-      return a.years_ago_1 ? a.years_ago_1 + ' years ago' : a.city_1 || '';
-    ]]]
-```
+## Known limitations
+
+- **Shared album assets**: Immich's `search/random` API filters by asset owner even when `albumIds` is specified. Photos uploaded by other users in a shared album won't appear. Workaround: set up [Partners](https://immich.app/docs/features/partner-sharing) in Immich. [Reported upstream](https://github.com/immich-app/immich/issues/28662).
+- **HEIC not supported**: Photos in HEIC/HEIF format are skipped.
 
 ## Requirements
 
 - Home Assistant 2024.1+
 - Immich server with API access
-
-## Known Limitations
-
-- **HEIC format not supported** — Photos in HEIC/HEIF format are not currently supported and will be skipped. Convert to JPEG in Immich or ensure your photos are stored in a compatible format.
 
 ## License
 
