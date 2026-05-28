@@ -47,7 +47,7 @@ from .hub import ImmichHub
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.IMAGE, Platform.SENSOR, Platform.CAMERA]
+PLATFORMS: list[Platform] = [Platform.IMAGE, Platform.SENSOR]
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:

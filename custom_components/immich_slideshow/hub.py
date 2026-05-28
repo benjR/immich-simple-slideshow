@@ -174,58 +174,6 @@ class ImmichHub:
         _LOGGER.error("All retries failed for download_asset %s", asset_id)
         return None
 
-    async def download_video(self, asset_id: str) -> bytes | None:
-        """Download a video asset from Immich.
-
-        Args:
-            asset_id: The ID of the video asset to download
-
-        Returns:
-            Video bytes or None if failed
-        """
-        url = f"{self._host}/api/assets/{asset_id}/original"
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                session = await self._get_session()
-                async with session.get(url, headers=self._headers()) as response:
-                    if response.status != 200:
-                        (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                            "Failed to download video %s (attempt %d/%d): %s",
-                            asset_id, attempt + 1, MAX_RETRIES, response.status
-                        )
-                    else:
-                        content_type = response.headers.get("content-type", "")
-                        if "video" not in content_type:
-                            _LOGGER.warning(
-                                "Unexpected content type for video %s: %s",
-                                asset_id, content_type
-                            )
-                            return None
-                        return await response.read()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                    "Error downloading video %s (attempt %d/%d): %s",
-                    asset_id, attempt + 1, MAX_RETRIES, err
-                )
-
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
-
-        _LOGGER.error("All retries failed for download_video %s", asset_id)
-        return None
-
-    def get_video_stream_url(self, asset_id: str) -> str:
-        """Get the streaming URL for a video asset.
-
-        Args:
-            asset_id: The ID of the video asset
-
-        Returns:
-            URL for video playback streaming
-        """
-        return f"{self._host}/api/assets/{asset_id}/video/playback"
-
     @property
     def api_key(self) -> str:
         """Return the API key for authenticated requests."""
