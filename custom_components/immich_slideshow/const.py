@@ -76,6 +76,76 @@ SCAN_INTERVAL = timedelta(seconds=DEFAULT_REFRESH_INTERVAL)
 VA_BACKGROUND_PATH = "view_assist/backgrounds"
 
 
+# =============================================================================
+# Immich API key permissions (Immich v3+ granular permissions)
+# =============================================================================
+# The integration talks to Immich with a scoped API key. Immich v3 enforces
+# granular permissions and answers 403 with a body of the form
+# {"message": "Missing required permission: <perm>"} when one is absent.
+# We surface the missing permission(s) at setup and after an Immich upgrade.
+
+PERM_ASSET_READ = "asset.read"          # search/random + asset metadata
+PERM_ASSET_DOWNLOAD = "asset.download"  # download original bytes to display
+PERM_MEMORY_READ = "memory.read"        # "On this day" memories source
+PERM_ALBUM_READ = "album.read"          # albums source + album attribution
+PERM_PERSON_READ = "person.read"        # persons source
+PERM_USER_READ = "user.read"            # resolve ownerId -> owner display name
+
+# Capability key -> human-facing Immich permission string.
+CAPABILITY_PERMISSION = {
+    "asset_read": PERM_ASSET_READ,
+    "asset_download": PERM_ASSET_DOWNLOAD,
+    "memory_read": PERM_MEMORY_READ,
+    "album_read": PERM_ALBUM_READ,
+    "person_read": PERM_PERSON_READ,
+    "user_read": PERM_USER_READ,
+}
+
+# Required for ANY photo to display, regardless of enabled sources.
+CORE_CAPABILITIES = ("asset_read", "asset_download")
+
+# A weighted source needs its capability only when enabled (weight > 0).
+SOURCE_WEIGHT_CAPABILITY = {
+    CONF_SOURCE_MEMORIES_WEIGHT: "memory_read",
+    CONF_SOURCE_ALBUMS_WEIGHT: "album_read",
+    CONF_SOURCE_PERSONS_WEIGHT: "person_read",
+}
+
+# Note: partner photos (shared libraries) flow through /api/search/random
+# automatically in Immich v3 and do NOT require the `partner.read` permission.
+# `user.read` is recommended (owner-name attribution) but not required.
+
+
+# =============================================================================
+# Minimum supported Immich server version
+# =============================================================================
+# The integration relies on Immich's plural REST API (/api/assets,
+# /api/search/random, /api/albums, /api/people, /api/memories). That API shape
+# landed with the singular->plural rename in Immich v1.106.0; older servers
+# return 404 for these paths, so the slideshow cannot work. We surface this as a
+# clear message rather than letting calls fail silently.
+MIN_IMMICH_VERSION = (1, 106, 0)
+
+
+def format_version(version: tuple[int, int, int] | None) -> str:
+    """Human-friendly 'major.minor.patch' string, or 'unknown' for None."""
+    return ".".join(str(part) for part in version) if version else "unknown"
+
+
+def required_capabilities(options: dict) -> list[str]:
+    """Capabilities the current config actually relies on.
+
+    Always includes the core capabilities; adds a source capability only when
+    that source has a non-zero weight. `user.read` is intentionally excluded
+    (nice-to-have, not required for the slideshow to work).
+    """
+    caps = list(CORE_CAPABILITIES)
+    for weight_key, cap in SOURCE_WEIGHT_CAPABILITY.items():
+        if (options.get(weight_key) or 0) > 0:
+            caps.append(cap)
+    return caps
+
+
 def parse_resolutions(resolutions_str: str) -> list[tuple[int, int]]:
     """Parse resolution string into list of (width, height) tuples.
 

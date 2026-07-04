@@ -84,7 +84,23 @@ The image entity exposes useful metadata (all per-photo attributes use `_1` suff
 
 ## API Permissions
 
-Required Immich API key permissions:
-- `asset.read`
-- `asset.download`
-- `memory.read`
+The integration checks the API key's permissions at setup and after each reload
+(Immich v3+ enforces granular permissions). Missing permissions are surfaced in
+the config flow and as a Repair issue.
+
+Core (always required, the slideshow can't display a photo without them):
+- `asset.read` — random search / asset metadata
+- `asset.download` — download the original bytes to display
+
+Per source (required only when that source's weight > 0):
+- `memory.read` — "On this day" memories source
+- `album.read` — albums source
+- `person.read` — persons source
+
+Recommended:
+- `user.read` — resolves the owner's display name for photo attribution
+
+Notes:
+- Partner (shared library) photos flow through the random search automatically in
+  Immich v3 and do **not** require `partner.read`.
+- Thumbnails (`asset.view`) are not used; the integration always fetches originals.

@@ -82,6 +82,9 @@
       "invalid_path": "Chemin invalide. Doit être relatif et ne peut pas contenir '..'",
       "no_sources_enabled": "Au moins une source doit avoir un poids supérieur à 0",
       "persons_source_no_selection": "La source Personnes est activée mais aucune personne n'est sélectionnée",
+      "missing_core_permissions": "Cette clé API n'a pas les permissions requises : {missing}. Ajoutez-les à la clé dans Immich (paramètres Clés API), puis collez-la à nouveau.",
+      "missing_source_permissions": "La clé API n'a pas les permissions pour les sources activées : {missing}. Accordez-les à la clé dans Immich, ou mettez le poids de ces sources à 0.",
+      "immich_version_unsupported": "Ce serveur Immich (v{version}) est plus ancien que la version minimale supportée (v{minimum}). Mettez Immich à jour, puis réessayez.",
       "unknown": "Erreur inattendue"
     },
     "abort": {
@@ -155,7 +158,21 @@
       "invalid_resolutions": "Format de résolution invalide. Utilisez LxH (ex: 1920x1080)",
       "invalid_path": "Chemin invalide. Doit être relatif et ne peut pas contenir '..'",
       "no_sources_enabled": "Au moins une source doit avoir un poids supérieur à 0",
-      "persons_source_no_selection": "La source Personnes est activée mais aucune personne n'est sélectionnée"
+      "persons_source_no_selection": "La source Personnes est activée mais aucune personne n'est sélectionnée",
+      "invalid_auth": "Clé API invalide",
+      "cannot_connect": "Impossible de se connecter à Immich",
+      "unknown": "Erreur inattendue",
+      "missing_source_permissions": "La clé API n'a pas les permissions pour les sources activées : {missing}. Accordez-les à la clé dans Immich, ou mettez le poids de ces sources à 0."
+    }
+  },
+  "issues": {
+    "missing_permissions": {
+      "title": "La clé API Immich manque de permissions",
+      "description": "Votre clé API Immich Slideshow n'a pas la ou les permissions suivantes : **{missing}**.\n\nCertaines sources de photos activées ne fonctionneront pas tant qu'elles ne sont pas accordées. Modifiez la clé dans Immich sous [Clés API]({url}), ajoutez la ou les permissions manquantes, et enregistrez. Pas besoin de re-saisir la clé ici — l'avertissement disparaît automatiquement au prochain rechargement."
+    },
+    "immich_version_unsupported": {
+      "title": "Le serveur Immich est trop ancien",
+      "description": "Votre serveur Immich est en **v{version}**, mais Immich Slideshow requiert au moins **v{minimum}**.\n\nLes serveurs plus anciens n'exposent pas l'API dont cette intégration a besoin, le diaporama risque donc de ne pas fonctionner. Mettez Immich à jour. Cet avertissement disparaît automatiquement une fois le serveur à jour."
     }
   },
   "selector": {

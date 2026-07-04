@@ -6,9 +6,13 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_API_KEY, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
+    required_capabilities,
+    MIN_IMMICH_VERSION,
+    format_version,
     # v2 config keys
     CONF_SOURCE_RECENT_WEIGHT,
     CONF_SOURCE_MEMORIES_WEIGHT,
@@ -137,6 +141,96 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     return True
 
 
+def _permissions_issue_id(entry: ConfigEntry) -> str:
+    """Stable repair-issue id for this entry's missing-permissions warning."""
+    return f"missing_permissions_{entry.entry_id}"
+
+
+def _version_issue_id(entry: ConfigEntry) -> str:
+    """Stable repair-issue id for this entry's unsupported-version warning."""
+    return f"immich_version_{entry.entry_id}"
+
+
+async def _async_update_version_issue(
+    hass: HomeAssistant, entry: ConfigEntry, hub: ImmichHub
+) -> None:
+    """Create or clear the 'Immich server too old' repair issue.
+
+    Non-blocking: an unknown version (None) is ignored so a transient failure
+    or a server that doesn't expose /api/server/version never raises a warning.
+    """
+    issue_id = _version_issue_id(entry)
+    version = await hub.get_server_version()
+    if version is not None and version < MIN_IMMICH_VERSION:
+        _LOGGER.warning(
+            "Immich server v%s is older than the minimum supported v%s; "
+            "the slideshow may not work until Immich is updated",
+            format_version(version),
+            format_version(MIN_IMMICH_VERSION),
+        )
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="immich_version_unsupported",
+            translation_placeholders={
+                "version": format_version(version),
+                "minimum": format_version(MIN_IMMICH_VERSION),
+            },
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+
+async def _async_update_permissions_issue(
+    hass: HomeAssistant, entry: ConfigEntry, hub: ImmichHub
+) -> None:
+    """Create or clear the 'missing API-key permissions' repair issue.
+
+    Only permissions actually needed by the current config (core + enabled
+    sources) are considered. `unknown` probe results (connection blips) are
+    ignored so we don't raise false alarms.
+    """
+    issue_id = _permissions_issue_id(entry)
+    try:
+        perms = await hub.check_permissions()
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("Permission check failed; skipping issue update", exc_info=True)
+        return
+
+    needed = required_capabilities(entry.options)
+    missing = sorted(
+        {
+            perms[cap]["permission"]
+            for cap in needed
+            if cap in perms and not perms[cap]["ok"] and not perms[cap]["unknown"]
+        }
+    )
+
+    if missing:
+        _LOGGER.warning(
+            "Immich API key is missing permissions %s — some slideshow sources "
+            "will not work until they are granted",
+            ", ".join(missing),
+        )
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="missing_permissions",
+            translation_placeholders={
+                "missing": ", ".join(missing),
+                "url": f"{entry.data[CONF_HOST]}/user-settings?isOpen=api-keys",
+            },
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Immich Slideshow from a config entry."""
     # API key can be updated via options, so check options first, then fall back to data
@@ -155,6 +249,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.error("Error connecting to Immich: %s", err)
         return False
+
+    # Warn (non-blocking) if the Immich server predates the plural REST API we
+    # rely on. Runs on every setup, so it also fires if Immich is downgraded.
+    await _async_update_version_issue(hass, entry, hub)
+
+    # Surface missing Immich API-key permissions as a repair issue. Immich v3+
+    # enforces granular permissions, so an Immich upgrade can silently strip a
+    # capability the slideshow relies on (e.g. memory.read for the memories
+    # source). Runs on every setup, so it also fires after an Immich update.
+    await _async_update_permissions_issue(hass, entry, hub)
 
     # Store the hub
     hass.data.setdefault(DOMAIN, {})

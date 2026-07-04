@@ -49,6 +49,12 @@ from .const import (
     # Global exclusions
     CONF_EXCLUDE_ALBUMS,
     CONF_EXCLUDE_PERSONS,
+    # API key permissions
+    CORE_CAPABILITIES,
+    SOURCE_WEIGHT_CAPABILITY,
+    # Server version guard
+    MIN_IMMICH_VERSION,
+    format_version,
     # Defaults
     DEFAULT_BACKGROUND_PATH,
     DEFAULT_DUAL_PORTRAIT,
@@ -375,6 +381,29 @@ def _flatten_settings_input(user_input: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _missing_core_permissions(permissions: dict[str, dict]) -> list[str]:
+    """Core permissions that are confirmed missing (not merely 'unknown')."""
+    return [
+        info["permission"]
+        for cap, info in permissions.items()
+        if cap in CORE_CAPABILITIES and not info["ok"] and not info["unknown"]
+    ]
+
+
+def _missing_source_permissions(
+    user_input: dict[str, Any], permissions: dict[str, dict]
+) -> list[str]:
+    """Permissions missing for the sources the user just enabled (weight > 0)."""
+    weights = user_input.get("source_weights", {})
+    missing: list[str] = []
+    for weight_key, cap in SOURCE_WEIGHT_CAPABILITY.items():
+        if (weights.get(weight_key) or 0) > 0:
+            info = permissions.get(cap)
+            if info and not info["ok"] and not info["unknown"]:
+                missing.append(info["permission"])
+    return missing
+
+
 async def _fetch_immich_options(host: str, api_key: str) -> tuple[list[dict], list[dict]]:
     """Fetch albums + people from Immich, return as selector option lists.
 
@@ -387,6 +416,15 @@ async def _fetch_immich_options(host: str, api_key: str) -> tuple[list[dict], li
     finally:
         await hub.close()
     return _album_options_from_cache(albums), _person_options_from_cache(people)
+
+
+async def _probe_permissions(host: str, api_key: str) -> dict[str, dict]:
+    """Probe the API key's Immich permissions. Returns {} on connection error."""
+    hub = ImmichHub(host=host, api_key=api_key)
+    try:
+        return await hub.check_permissions()
+    finally:
+        await hub.close()
 
 
 # =============================================================================
@@ -405,6 +443,7 @@ class ImmichSlideshowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._api_key: str | None = None
         self._album_options: list[dict] = []
         self._person_options: list[dict] = []
+        self._permissions: dict[str, dict] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -434,7 +473,45 @@ class ImmichSlideshowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 if await hub.authenticate():
                     self._api_key = api_key
+
+                    # Reject servers too old for the plural REST API we use.
+                    version = await hub.get_server_version()
+                    if version is not None and version < MIN_IMMICH_VERSION:
+                        await hub.close()
+                        errors["base"] = "immich_version_unsupported"
+                        return self.async_show_form(
+                            step_id="api_key",
+                            data_schema=vol.Schema({vol.Required(CONF_API_KEY): str}),
+                            errors=errors,
+                            description_placeholders={
+                                "api_keys_url": (
+                                    f"{self._host}/user-settings?isOpen=api-keys"
+                                ),
+                                "version": format_version(version),
+                                "minimum": format_version(MIN_IMMICH_VERSION),
+                            },
+                        )
+
+                    # Probe the API key's granular permissions (Immich v3+).
+                    self._permissions = await hub.check_permissions()
                     await hub.close()
+
+                    # Block early if the key can't even display a photo.
+                    missing_core = _missing_core_permissions(self._permissions)
+                    if missing_core:
+                        errors["base"] = "missing_core_permissions"
+                        return self.async_show_form(
+                            step_id="api_key",
+                            data_schema=vol.Schema({vol.Required(CONF_API_KEY): str}),
+                            errors=errors,
+                            description_placeholders={
+                                "api_keys_url": (
+                                    f"{self._host}/user-settings?isOpen=api-keys"
+                                ),
+                                "missing": ", ".join(missing_core),
+                            },
+                        )
+
                     # Pre-fetch albums + people now while we're authenticated.
                     # If permissions are missing, lists come back empty and the
                     # corresponding sections just won't render (graceful).
@@ -464,18 +541,26 @@ class ImmichSlideshowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Step 3: full slideshow settings (sources, weights, filters, display, etc.)."""
         errors: dict[str, str] = {}
+        missing_perms: list[str] = []
 
         if user_input is not None:
             errors = _validate_settings_input(user_input)
             if not errors:
-                return self.async_create_entry(
-                    title="Immich Slideshow",
-                    data={
-                        CONF_HOST: self._host,
-                        CONF_API_KEY: self._api_key,
-                    },
-                    options=_flatten_settings_input(user_input),
+                # A source can only be enabled if its API-key permission exists.
+                missing_perms = _missing_source_permissions(
+                    user_input, self._permissions
                 )
+                if missing_perms:
+                    errors["base"] = "missing_source_permissions"
+                else:
+                    return self.async_create_entry(
+                        title="Immich Slideshow",
+                        data={
+                            CONF_HOST: self._host,
+                            CONF_API_KEY: self._api_key,
+                        },
+                        options=_flatten_settings_input(user_input),
+                    )
 
         # Defaults (no existing options on first install)
         schema_dict = _build_settings_schema(
@@ -488,6 +573,7 @@ class ImmichSlideshowConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="settings",
             data_schema=vol.Schema(schema_dict),
             errors=errors,
+            description_placeholders={"missing": ", ".join(missing_perms)},
         )
 
     @staticmethod
@@ -531,6 +617,7 @@ class ImmichSlideshowOptionsFlow(config_entries.OptionsFlow):
         """Show full configuration with collapsible sections (incl. connection re-auth)."""
         options = dict(self.config_entry.options)
         errors: dict[str, str] = {}
+        missing_perms: list[str] = []
 
         await self._ensure_immich_options()
 
@@ -556,6 +643,15 @@ class ImmichSlideshowOptionsFlow(config_entries.OptionsFlow):
 
             if not errors:
                 errors = _validate_settings_input(user_input)
+
+            if not errors:
+                # Verify the (possibly updated) key can serve the enabled sources.
+                perms = await _probe_permissions(
+                    new_host or current_host, new_api_key or current_api_key
+                )
+                missing_perms = _missing_source_permissions(user_input, perms)
+                if missing_perms:
+                    errors["base"] = "missing_source_permissions"
 
             if not errors:
                 if new_host != current_host or new_api_key != current_api_key:
@@ -587,5 +683,8 @@ class ImmichSlideshowOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(schema_dict),
             errors=errors,
-            description_placeholders={"api_keys_url": api_keys_url},
+            description_placeholders={
+                "api_keys_url": api_keys_url,
+                "missing": ", ".join(missing_perms),
+            },
         )

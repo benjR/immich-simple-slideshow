@@ -148,15 +148,43 @@ The image entity exposes these attributes (suffixed `_1`, and `_2` when dual por
 | `sensor.immich_slideshow_current_source` | Source of the currently displayed photo |
 | `sensor.immich_slideshow_prefetch_status` | Prefetch state (idle, fetching, ready) |
 
+## API key permissions
+
+Create the API key in Immich under **User Settings → API Keys**. The integration
+checks the key's permissions at setup and after every reload (Immich v3+ enforces
+granular permissions); anything missing is shown in the config flow and as a
+Repair issue in Home Assistant.
+
+| Permission | When it's needed |
+|------------|------------------|
+| `asset.read` | Always (random search, metadata) |
+| `asset.download` | Always (fetch the photo to display) |
+| `memory.read` | Only if the **Memories** source is enabled |
+| `album.read` | Only if the **Albums** source is enabled |
+| `person.read` | Only if the **Persons** source is enabled |
+| `user.read` | Recommended (shows the photo owner's name) |
+
+> Partner (shared library) photos flow through the random search automatically on
+> Immich v3+ and do **not** need `partner.read`. Thumbnails (`asset.view`) aren't
+> used — the integration always fetches originals.
+
 ## Known limitations
 
-- **Shared album assets**: Immich's `search/random` API filters by asset owner even when `albumIds` is specified. Photos uploaded by other users in a shared album won't appear. Workaround: set up [Partners](https://immich.app/docs/features/partner-sharing) in Immich. [Reported upstream](https://github.com/immich-app/immich/issues/28662).
+- **Shared album assets (Immich < v3)**: on older Immich, `search/random` filtered
+  by asset owner, so photos uploaded by other users in a shared album didn't appear
+  ([reported upstream](https://github.com/immich-app/immich/issues/28662)). **Fixed
+  in Immich v3+** — partner-shared photos now show up automatically. On older
+  servers, set up [Partners](https://immich.app/docs/features/partner-sharing) as a
+  workaround.
 - **HEIC not supported**: Photos in HEIC/HEIF format are skipped.
 
 ## Requirements
 
 - Home Assistant 2024.1+
-- Immich server with API access
+- **Immich v1.106.0 or newer** (the integration uses Immich's plural REST API;
+  older servers are detected and flagged with a Repair issue). Tested against
+  Immich v3.x.
+- An Immich API key with the [permissions above](#api-key-permissions)
 
 ## License
 

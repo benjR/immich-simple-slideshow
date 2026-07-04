@@ -82,6 +82,9 @@
       "invalid_path": "Invalid path. Must be relative and cannot contain '..'",
       "no_sources_enabled": "At least one source must have a weight greater than 0",
       "persons_source_no_selection": "Persons source is enabled but no persons are selected",
+      "missing_core_permissions": "This API key is missing required permissions: {missing}. Add them to the key in Immich (API Keys settings), then paste it again.",
+      "missing_source_permissions": "The API key is missing permissions for the sources you enabled: {missing}. Either grant them to the key in Immich, or set those sources' weight to 0.",
+      "immich_version_unsupported": "This Immich server (v{version}) is older than the minimum supported version (v{minimum}). Please update Immich, then try again.",
       "unknown": "Unexpected error"
     },
     "abort": {
@@ -155,7 +158,21 @@
       "invalid_resolutions": "Invalid resolution format. Use WxH (e.g., 1920x1080)",
       "invalid_path": "Invalid path. Must be relative and cannot contain '..'",
       "no_sources_enabled": "At least one source must have a weight greater than 0",
-      "persons_source_no_selection": "Persons source is enabled but no persons are selected"
+      "persons_source_no_selection": "Persons source is enabled but no persons are selected",
+      "invalid_auth": "Invalid API key",
+      "cannot_connect": "Failed to connect to Immich",
+      "unknown": "Unexpected error",
+      "missing_source_permissions": "The API key is missing permissions for the sources you enabled: {missing}. Either grant them to the key in Immich, or set those sources' weight to 0."
+    }
+  },
+  "issues": {
+    "missing_permissions": {
+      "title": "Immich API key is missing permissions",
+      "description": "Your Immich Slideshow API key is missing the following permission(s): **{missing}**.\n\nSome enabled photo sources will not work until you grant them. Edit the key in Immich under [API Keys]({url}), add the missing permission(s), and save. No need to re-enter the key here — the warning clears automatically on the next reload."
+    },
+    "immich_version_unsupported": {
+      "title": "Immich server is too old",
+      "description": "Your Immich server is **v{version}**, but Immich Slideshow requires at least **v{minimum}**.\n\nOlder servers don't expose the API this integration needs, so the slideshow may not work. Please update Immich. This warning clears automatically once the server is up to date."
     }
   },
   "selector": {

@@ -10,6 +10,8 @@ from typing import Any
 
 import aiohttp
 
+from .const import CAPABILITY_PERMISSION, PERM_ASSET_DOWNLOAD
+
 _LOGGER = logging.getLogger(__name__)
 
 # API settings
@@ -72,6 +74,136 @@ class ImmichHub:
             _LOGGER.error("Error connecting to Immich: %s", err)
             raise CannotConnect from err
 
+    async def get_server_version(self) -> tuple[int, int, int] | None:
+        """Return the Immich server version as (major, minor, patch).
+
+        Uses the public /api/server/version endpoint (no permission required).
+        Returns None if the version can't be determined (endpoint missing on a
+        very old server, connection error, or unexpected payload) — callers
+        treat None as "unknown" and don't raise version warnings.
+        """
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self._host}/api/server/version", headers=self._headers()
+            ) as response:
+                if response.status != 200:
+                    return None
+                data = await response.json()
+                return (
+                    int(data["major"]),
+                    int(data["minor"]),
+                    int(data["patch"]),
+                )
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as err:
+            _LOGGER.debug("Could not determine Immich server version: %s", err)
+            return None
+
+    async def _probe(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        headers_extra: dict[str, str] | None = None,
+    ) -> tuple[int | None, str | None]:
+        """Issue one lightweight request for capability probing.
+
+        Returns (status_code, missing_permission). `missing_permission` is
+        parsed from Immich's 403 body ({"message": "Missing required
+        permission: <perm>"}). `status_code` is None on a connection error so
+        callers can treat the verdict as "unknown" rather than "denied".
+        """
+        headers = self._headers()
+        if headers_extra:
+            headers = {**headers, **headers_extra}
+        try:
+            session = await self._get_session()
+            async with session.request(
+                method, f"{self._host}{path}", json=json_body, headers=headers
+            ) as response:
+                if response.status == 403:
+                    perm = None
+                    try:
+                        body = await response.json()
+                        msg = body.get("message", "") if isinstance(body, dict) else ""
+                    except (aiohttp.ClientError, ValueError):
+                        msg = ""
+                    marker = "Missing required permission:"
+                    if marker in msg:
+                        perm = msg.split(marker, 1)[1].strip()
+                    return response.status, perm
+                return response.status, None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            _LOGGER.debug("Permission probe %s %s failed: %s", method, path, err)
+            return None, None
+
+    async def check_permissions(self) -> dict[str, dict[str, Any]]:
+        """Probe the API key's capabilities against the live Immich API.
+
+        Returns a mapping ``capability -> {"ok": bool, "permission": str,
+        "unknown": bool}``. ``unknown`` is True when the probe could not reach a
+        verdict (connection error), so callers don't raise false alarms.
+
+        Capabilities probed: asset_read, asset_download, memory_read,
+        album_read, person_read, user_read.
+        """
+        results: dict[str, dict[str, Any]] = {}
+
+        def record(cap: str, status: int | None) -> None:
+            results[cap] = {
+                "ok": status is not None and status < 400,
+                "permission": CAPABILITY_PERMISSION[cap],
+                "unknown": status is None,
+            }
+
+        # asset.read — via search/random (the slideshow's core call).
+        status, _ = await self._probe(
+            "POST", "/api/search/random", json_body={"type": "IMAGE", "size": 1}
+        )
+        record("asset_read", status)
+
+        # asset.download — needs a real asset id. Reuse search/random, then do a
+        # 1-byte Range GET on /original so we don't pull a full-res file.
+        asset_id: str | None = None
+        if status == 200:
+            assets = await self._post_search_random({"type": "IMAGE", "size": 1})
+            if assets:
+                asset_id = assets[0].get("id")
+        if asset_id:
+            dl_status, _ = await self._probe(
+                "GET",
+                f"/api/assets/{asset_id}/original",
+                headers_extra={"Range": "bytes=0-0"},
+            )
+            record("asset_download", dl_status)
+        else:
+            # Couldn't obtain an id (no assets, or asset.read denied): can't
+            # verify download → mark unknown rather than falsely denied.
+            results["asset_download"] = {
+                "ok": False,
+                "permission": PERM_ASSET_DOWNLOAD,
+                "unknown": True,
+            }
+
+        # Source + attribution capabilities (simple GETs).
+        for cap, path in (
+            ("memory_read", "/api/memories"),
+            ("album_read", "/api/albums"),
+            ("person_read", "/api/people"),
+            ("user_read", "/api/users"),
+        ):
+            st, _ = await self._probe("GET", path)
+            record(cap, st)
+
+        return results
+
     async def search_random_recent(
         self,
         days: int = 90,
@@ -88,7 +220,12 @@ class ImmichHub:
         Returns:
             List of asset dictionaries with id, originalWidth, originalHeight, etc.
         """
-        taken_after = (datetime.now() - timedelta(days=days)).isoformat()
+        # Immich v3 validates date filters as ISO-8601 UTC datetimes (zod
+        # .datetime(), trailing 'Z' required). A naive isoformat() with
+        # microseconds and no 'Z' is rejected with HTTP 400.
+        taken_after = (datetime.now() - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
 
         json_body: dict[str, Any] = {
             "takenAfter": taken_after,
@@ -218,6 +355,12 @@ class ImmichHub:
         """
         if for_date is None:
             for_date = datetime.now().strftime("%Y-%m-%d")
+        # Immich v3 validates `for` as an ISO-8601 UTC datetime (zod .datetime(),
+        # trailing 'Z' required, ms precision). A bare "YYYY-MM-DD" — or a naive
+        # isoformat() with microseconds and no 'Z' — is rejected with HTTP 400.
+        # Only the date matters for "on this day", so we pin midnight UTC.
+        if len(for_date) == 10:
+            for_date = f"{for_date}T00:00:00.000Z"
 
         url = f"{self._host}/api/memories"
         params = {"type": "on_this_day", "for": for_date}
