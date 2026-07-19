@@ -81,6 +81,11 @@ MOCK_USER_INPUT = {
 @pytest.fixture
 def mock_hub_authenticate_success() -> Generator[AsyncMock, None, None]:
     """Mock ImmichHub with successful authentication and empty albums/people."""
+    from custom_components.immich_slideshow.const import (
+        CAPABILITY_PERMISSION,
+        MIN_IMMICH_VERSION,
+    )
+
     with patch(
         "custom_components.immich_slideshow.config_flow.ImmichHub"
     ) as mock_hub_class:
@@ -90,6 +95,13 @@ def mock_hub_authenticate_success() -> Generator[AsyncMock, None, None]:
         # New: post-auth fetch in config flow needs these to return lists
         mock_hub.get_albums.return_value = []
         mock_hub.get_people.return_value = []
+        # v2.1.0: config flow guards on server version and probes permissions.
+        # A supported version and all-granted permissions keep the happy path green.
+        mock_hub.get_server_version.return_value = MIN_IMMICH_VERSION
+        mock_hub.check_permissions.return_value = {
+            cap: {"ok": True, "permission": perm, "unknown": False}
+            for cap, perm in CAPABILITY_PERMISSION.items()
+        }
         mock_hub_class.return_value = mock_hub
         yield mock_hub
 

@@ -6,6 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_API_KEY, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
 from .const import (
@@ -247,8 +248,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Failed to authenticate with Immich")
             return False
     except Exception as err:
-        _LOGGER.error("Error connecting to Immich: %s", err)
-        return False
+        # Immich unreachable (down/restarting): raise ConfigEntryNotReady so HA
+        # automatically retries setup with exponential backoff until it recovers,
+        # instead of failing permanently. Auth failures above still return False.
+        raise ConfigEntryNotReady(f"Error connecting to Immich: {err}") from err
 
     # Warn (non-blocking) if the Immich server predates the plural REST API we
     # rely on. Runs on every setup, so it also fires if Immich is downgraded.
