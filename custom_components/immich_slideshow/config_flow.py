@@ -40,6 +40,9 @@ from .const import (
     # Recent source
     CONF_RECENT_DAYS,
     CONF_RECENT_FAVORITES_FILTER,
+    CONF_RECENT_BOOST_DAYS,
+    CONF_RECENT_BOOST_SHARE,
+    CONF_RECENT_BOOST_RESHOW_HOURS,
     # Memories source
     CONF_MEMORIES_MAX_YEARS,
     # Albums source
@@ -49,6 +52,7 @@ from .const import (
     # Global exclusions
     CONF_EXCLUDE_ALBUMS,
     CONF_EXCLUDE_PERSONS,
+    CONF_INCLUDE_ARCHIVED,
     # API key permissions
     CORE_CAPABILITIES,
     SOURCE_WEIGHT_CAPABILITY,
@@ -67,7 +71,11 @@ from .const import (
     DEFAULT_SOURCE_PERSONS_WEIGHT,
     DEFAULT_RECENT_DAYS,
     DEFAULT_RECENT_FAVORITES_FILTER,
+    DEFAULT_RECENT_BOOST_DAYS,
+    DEFAULT_RECENT_BOOST_SHARE,
+    DEFAULT_RECENT_BOOST_RESHOW_HOURS,
     DEFAULT_MEMORIES_MAX_YEARS,
+    DEFAULT_INCLUDE_ARCHIVED,
     DOMAIN,
     parse_resolutions,
 )
@@ -200,6 +208,29 @@ def _build_settings_schema(
                     translation_key="recent_favorites_filter",
                 )
             ),
+            vol.Optional(
+                CONF_RECENT_BOOST_DAYS,
+                default=options.get(CONF_RECENT_BOOST_DAYS, DEFAULT_RECENT_BOOST_DAYS),
+            ): NumberSelector(
+                NumberSelectorConfig(min=0, max=90, mode=NumberSelectorMode.BOX)
+            ),
+            vol.Optional(
+                CONF_RECENT_BOOST_SHARE,
+                default=options.get(CONF_RECENT_BOOST_SHARE, DEFAULT_RECENT_BOOST_SHARE),
+            ): NumberSelector(
+                NumberSelectorConfig(min=0, max=100, step=5, mode=NumberSelectorMode.SLIDER)
+            ),
+            vol.Optional(
+                CONF_RECENT_BOOST_RESHOW_HOURS,
+                default=options.get(
+                    CONF_RECENT_BOOST_RESHOW_HOURS, DEFAULT_RECENT_BOOST_RESHOW_HOURS
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=1, max=24, step=1, unit_of_measurement="h",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
         }),
         {"collapsed": True},
     )
@@ -277,6 +308,10 @@ def _build_settings_schema(
                 mode=SelectSelectorMode.DROPDOWN,
             )
         )
+    advanced_schema_dict[vol.Optional(
+        CONF_INCLUDE_ARCHIVED,
+        default=options.get(CONF_INCLUDE_ARCHIVED, DEFAULT_INCLUDE_ARCHIVED),
+    )] = BooleanSelector()
     advanced_schema_dict[vol.Optional(
         CONF_RESOLUTIONS,
         default=options.get(CONF_RESOLUTIONS, DEFAULT_RESOLUTIONS),
@@ -368,11 +403,17 @@ def _flatten_settings_input(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_SOURCE_PERSONS_WEIGHT: weights.get(CONF_SOURCE_PERSONS_WEIGHT, DEFAULT_SOURCE_PERSONS_WEIGHT),
         CONF_RECENT_DAYS: recent.get(CONF_RECENT_DAYS, DEFAULT_RECENT_DAYS),
         CONF_RECENT_FAVORITES_FILTER: recent.get(CONF_RECENT_FAVORITES_FILTER, DEFAULT_RECENT_FAVORITES_FILTER),
+        CONF_RECENT_BOOST_DAYS: recent.get(CONF_RECENT_BOOST_DAYS, DEFAULT_RECENT_BOOST_DAYS),
+        CONF_RECENT_BOOST_SHARE: recent.get(CONF_RECENT_BOOST_SHARE, DEFAULT_RECENT_BOOST_SHARE),
+        CONF_RECENT_BOOST_RESHOW_HOURS: recent.get(
+            CONF_RECENT_BOOST_RESHOW_HOURS, DEFAULT_RECENT_BOOST_RESHOW_HOURS
+        ),
         CONF_MEMORIES_MAX_YEARS: memories.get(CONF_MEMORIES_MAX_YEARS, DEFAULT_MEMORIES_MAX_YEARS),
         CONF_ALBUMS_INCLUDE: albums.get(CONF_ALBUMS_INCLUDE, []),
         CONF_PERSONS_INCLUDE: persons.get(CONF_PERSONS_INCLUDE, []),
         CONF_EXCLUDE_ALBUMS: advanced.get(CONF_EXCLUDE_ALBUMS, []),
         CONF_EXCLUDE_PERSONS: advanced.get(CONF_EXCLUDE_PERSONS, []),
+        CONF_INCLUDE_ARCHIVED: advanced.get(CONF_INCLUDE_ARCHIVED, DEFAULT_INCLUDE_ARCHIVED),
         CONF_DUAL_PORTRAIT: advanced.get(CONF_DUAL_PORTRAIT, DEFAULT_DUAL_PORTRAIT),
         CONF_RESOLUTIONS: advanced.get(CONF_RESOLUTIONS, DEFAULT_RESOLUTIONS),
         CONF_REFRESH_INTERVAL: advanced.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL),

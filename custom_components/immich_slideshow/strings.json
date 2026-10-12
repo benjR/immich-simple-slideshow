@@ -13,7 +13,7 @@
       },
       "api_key": {
         "title": "Immich Simple Slideshow - API Key",
-        "description": "Create an API key in Immich: [{api_keys_url}]({api_keys_url})\n\nRequired permissions: **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**",
+        "description": "Create an API key in Immich: [{api_keys_url}]({api_keys_url})\n\nRequired permissions: **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**\n\nRecommended: **asset.view** (displays HEIC and other formats via Immich's converted rendition)",
         "data": {
           "api_key": "API Key"
         },
@@ -29,7 +29,10 @@
             "name": "Recent Photos — last N days",
             "data": {
               "recent_days": "Days to look back (0 = unlimited)",
-              "recent_favorites_filter": "Favorites filter"
+              "recent_favorites_filter": "Favorites filter",
+              "recent_boost_days": "Boost window — very recent days (0 = disabled)",
+              "recent_boost_share": "Boost share — % of recent draws from the boost window",
+              "recent_boost_reshow_hours": "Boost reshow delay — hours before a boosted photo can repeat"
             }
           },
           "memories_source": {
@@ -65,6 +68,7 @@
             "data": {
               "exclude_albums": "Exclusions — Albums",
               "exclude_persons": "Exclusions — Persons",
+              "include_archived": "Filters — Include archived photos",
               "resolutions": "Display — Resolutions",
               "refresh_interval": "Display — Interval (seconds)",
               "dual_portrait": "Display — Dual portrait",
@@ -101,14 +105,17 @@
           "api_key": "API Key"
         },
         "data_description": {
-          "api_key": "Required permissions: **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**. Manage keys: [{api_keys_url}]({api_keys_url})"
+          "api_key": "Required permissions: **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**. Recommended: **asset.view** (displays HEIC and other formats via Immich's converted rendition). Manage keys: [{api_keys_url}]({api_keys_url})"
         },
         "sections": {
           "recent_source": {
             "name": "Recent Photos — last N days",
             "data": {
               "recent_days": "Days to look back (0 = unlimited)",
-              "recent_favorites_filter": "Favorites filter"
+              "recent_favorites_filter": "Favorites filter",
+              "recent_boost_days": "Boost window — very recent days (0 = disabled)",
+              "recent_boost_share": "Boost share — % of recent draws from the boost window",
+              "recent_boost_reshow_hours": "Boost reshow delay — hours before a boosted photo can repeat"
             }
           },
           "memories_source": {
@@ -144,6 +151,7 @@
             "data": {
               "exclude_albums": "Exclusions — Albums",
               "exclude_persons": "Exclusions — Persons",
+              "include_archived": "Filters — Include archived photos",
               "resolutions": "Display — Resolutions",
               "refresh_interval": "Display — Interval (seconds)",
               "dual_portrait": "Display — Dual portrait",
@@ -166,6 +174,10 @@
     }
   },
   "issues": {
+    "missing_recommended_permissions": {
+      "title": "Immich API key is missing a recommended permission",
+      "description": "Your Immich Slideshow API key is missing the recommended permission(s): **{missing}**.\n\nThe slideshow keeps working, but photos Home Assistant can't decode from the original file (HEIC saved as .jpg, PSD, very large panoramas…) are skipped instead of being displayed from Immich's converted JPEG. Edit the key in Immich under [API Keys]({url}), add the permission, and save. The warning clears automatically on the next reload."
+    },
     "missing_permissions": {
       "title": "Immich API key is missing permissions",
       "description": "Your Immich Slideshow API key is missing the following permission(s): **{missing}**.\n\nSome enabled photo sources will not work until you grant them. Edit the key in Immich under [API Keys]({url}), add the missing permission(s), and save. No need to re-enter the key here — the warning clears automatically on the next reload."

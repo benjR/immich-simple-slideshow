@@ -364,3 +364,56 @@ async def test_migrate_v2_is_noop(hass: HomeAssistant) -> None:
     assert entry.version == 2
     assert entry.options[CONF_SOURCE_RECENT_WEIGHT] == 75
     assert entry.options[CONF_SOURCE_MEMORIES_WEIGHT] == 25
+
+
+def test_settings_include_archived_defaults_to_false() -> None:
+    """The include_archived option is off unless explicitly enabled."""
+    from custom_components.immich_slideshow.config_flow import _flatten_settings_input
+    from custom_components.immich_slideshow.const import CONF_INCLUDE_ARCHIVED
+
+    assert _flatten_settings_input({})[CONF_INCLUDE_ARCHIVED] is False
+    enabled = _flatten_settings_input({"advanced": {CONF_INCLUDE_ARCHIVED: True}})
+    assert enabled[CONF_INCLUDE_ARCHIVED] is True
+
+
+def test_settings_schema_exposes_include_archived() -> None:
+    """The option is rendered in the advanced section with the stored value."""
+    from custom_components.immich_slideshow.config_flow import _build_settings_schema
+    from custom_components.immich_slideshow.const import CONF_INCLUDE_ARCHIVED
+
+    schema = _build_settings_schema({CONF_INCLUDE_ARCHIVED: True}, [], [])
+    advanced = next(v for k, v in schema.items() if str(k) == "advanced")
+    keys = {str(k): k for k in advanced.schema.schema}
+    assert CONF_INCLUDE_ARCHIVED in keys
+    assert keys[CONF_INCLUDE_ARCHIVED].default() is True
+
+
+def test_settings_boost_reshow_hours_default_and_value() -> None:
+    """The boost reshow delay defaults to 4 h and honours the stored value."""
+    from custom_components.immich_slideshow.config_flow import _flatten_settings_input
+    from custom_components.immich_slideshow.const import (
+        CONF_RECENT_BOOST_RESHOW_HOURS,
+        DEFAULT_RECENT_BOOST_RESHOW_HOURS,
+    )
+
+    assert DEFAULT_RECENT_BOOST_RESHOW_HOURS == 4
+    assert (
+        _flatten_settings_input({})[CONF_RECENT_BOOST_RESHOW_HOURS]
+        == DEFAULT_RECENT_BOOST_RESHOW_HOURS
+    )
+    custom = _flatten_settings_input(
+        {"recent_source": {CONF_RECENT_BOOST_RESHOW_HOURS: 1}}
+    )
+    assert custom[CONF_RECENT_BOOST_RESHOW_HOURS] == 1
+
+
+def test_settings_schema_exposes_boost_reshow_hours() -> None:
+    """The option is rendered in the recent source section with the stored value."""
+    from custom_components.immich_slideshow.config_flow import _build_settings_schema
+    from custom_components.immich_slideshow.const import CONF_RECENT_BOOST_RESHOW_HOURS
+
+    schema = _build_settings_schema({CONF_RECENT_BOOST_RESHOW_HOURS: 2}, [], [])
+    recent = next(v for k, v in schema.items() if str(k) == "recent_source")
+    keys = {str(k): k for k in recent.schema.schema}
+    assert CONF_RECENT_BOOST_RESHOW_HOURS in keys
+    assert keys[CONF_RECENT_BOOST_RESHOW_HOURS].default() == 2

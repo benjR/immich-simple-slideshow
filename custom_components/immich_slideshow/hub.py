@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 import logging
 import math
 import random
@@ -10,7 +11,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import CAPABILITY_PERMISSION, PERM_ASSET_DOWNLOAD
+from .const import CAPABILITY_PERMISSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,9 +20,20 @@ API_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 MAX_RETRIES = 3
 RETRY_DELAYS = [1, 2, 4]  # Exponential backoff in seconds
 # Max parallel calls when fanning out one-call-per-id (multi-album / multi-person
-# random search). Immich's albumIds/personIds filters are AND-only, so we issue
-# one call per id and combine.
+# random search). One call per id keeps exposure balanced across albums/persons
+# (a single `any` query would weight each id by its photo count).
 API_CONCURRENCY_LIMIT = 5
+
+# Immich 3.2 introduced the structured search API (`filter` tree with AND/OR
+# and any/all/none id filters). The flat fields are deprecated (removed in v4)
+# and cannot be mixed with `filter` in the same request (HTTP 400).
+SEARCH_V2_MIN_VERSION = (3, 2, 0)
+# String pattern filters are wrapped server-side as ILIKE '%<pattern>%', and
+# `_` is a single-char wildcard: escape it so the pattern means "contains '._'".
+# Matches macOS AppleDouble metadata files (`._IMG_0275.JPG`) imported as photos.
+APPLEDOUBLE_NAME_PATTERN = ".\\_"
+# Statuses that won't change on retry
+NO_RETRY_STATUSES = (400, 401, 403, 404)
 
 
 class CannotConnect(Exception):
@@ -41,6 +53,13 @@ class ImmichHub:
         self._api_key = api_key
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
+        # None = not detected yet (or version unknown → retried next search)
+        self._search_v2: bool | None = None
+        self._search_api_lock = asyncio.Lock()
+        # Set once /thumbnail answers 401/403 (API key lacks asset.view)
+        self._asset_view_denied = False
+        # Album id sets already reported as rejected (400), to warn only once
+        self._warned_rejected_albums: set[frozenset[str]] = set()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session with timeout."""
@@ -151,8 +170,8 @@ class ImmichHub:
         "unknown": bool}``. ``unknown`` is True when the probe could not reach a
         verdict (connection error), so callers don't raise false alarms.
 
-        Capabilities probed: asset_read, asset_download, memory_read,
-        album_read, person_read, user_read.
+        Capabilities probed: asset_read, asset_download, asset_view,
+        memory_read, album_read, person_read, user_read.
         """
         results: dict[str, dict[str, Any]] = {}
 
@@ -183,14 +202,23 @@ class ImmichHub:
                 headers_extra={"Range": "bytes=0-0"},
             )
             record("asset_download", dl_status)
+            # asset.view — renditions endpoint; the tiny "thumbnail" size keeps
+            # the probe cheap (Immich may ignore the Range header there).
+            view_status, _ = await self._probe(
+                "GET",
+                f"/api/assets/{asset_id}/thumbnail?size=thumbnail",
+                headers_extra={"Range": "bytes=0-0"},
+            )
+            record("asset_view", view_status)
         else:
             # Couldn't obtain an id (no assets, or asset.read denied): can't
-            # verify download → mark unknown rather than falsely denied.
-            results["asset_download"] = {
-                "ok": False,
-                "permission": PERM_ASSET_DOWNLOAD,
-                "unknown": True,
-            }
+            # verify download/view → mark unknown rather than falsely denied.
+            for cap in ("asset_download", "asset_view"):
+                results[cap] = {
+                    "ok": False,
+                    "permission": CAPABILITY_PERMISSION[cap],
+                    "unknown": True,
+                }
 
         # Source + attribution capabilities (simple GETs).
         for cap, path in (
@@ -204,101 +232,276 @@ class ImmichHub:
 
         return results
 
+    @property
+    def supports_search_v2(self) -> bool:
+        """Return True if the server exposes the structured search API (3.2+).
+
+        False until detection succeeded (see detect_search_api), so callers
+        that read it before any search get the conservative legacy answer.
+        """
+        return bool(self._search_v2)
+
+    async def detect_search_api(self) -> bool:
+        """Detect whether the server supports the structured search API.
+
+        True iff the server version is >= SEARCH_V2_MIN_VERSION. The verdict is
+        cached; an unknown version (endpoint unreachable, odd payload) falls
+        back to the legacy flat API for now and is re-detected next time.
+        """
+        # A pool refill fans out several searches at once: serialize detection
+        # so the version endpoint is queried once, not once per search.
+        async with self._search_api_lock:
+            if self._search_v2 is not None:
+                return self._search_v2
+            version = await self.get_server_version()
+            if version is None:
+                _LOGGER.debug("Immich version unknown, using legacy search API for now")
+                return False
+            self._search_v2 = version >= SEARCH_V2_MIN_VERSION
+            _LOGGER.debug(
+                "Immich %s: using %s search API",
+                ".".join(str(part) for part in version),
+                "structured (filter)" if self._search_v2 else "legacy (flat)",
+            )
+            return self._search_v2
+
+    async def _ensure_search_api(self) -> bool:
+        """Lazily detect the search API flavour before a search."""
+        if self._search_v2 is None:
+            return await self.detect_search_api()
+        return self._search_v2
+
+    @staticmethod
+    def _utc_days_ago(days: float) -> str:
+        """Return now - days as an ISO-8601 UTC datetime accepted by Immich.
+
+        Immich v3 validates date filters as ISO-8601 UTC datetimes (zod
+        .datetime(), trailing 'Z' required). A naive isoformat() with
+        microseconds and no 'Z' is rejected with HTTP 400.
+        """
+        return (datetime.now() - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+
+    def _build_search_body(
+        self,
+        count: int,
+        *,
+        include_archived: bool,
+        exclude_album_ids: Iterable[str],
+        exclude_person_ids: Iterable[str],
+        conditions: dict[str, Any] | None = None,
+        legacy_fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a /api/search/random body for the detected API flavour.
+
+        Structured API (Immich 3.2+): everything goes in `filter` — images only,
+        not trashed (no implicit trash filter there), timeline (+ archive when
+        include_archived), no AppleDouble junk, the method's `conditions`, and
+        the exclusions as server-side `none` id filters.
+
+        Legacy flat API: `legacy_fields` + `visibility: timeline` unless
+        include_archived (the flat API returns archived assets by default).
+        Exclusions can't be expressed there: callers filter client-side.
+
+        Both flavours ask for exifInfo and people so assets come back complete.
+        """
+        body: dict[str, Any] = {"size": count, "withExif": True, "withPeople": True}
+
+        if not self.supports_search_v2:
+            body["type"] = "IMAGE"
+            if not include_archived:
+                body["visibility"] = "timeline"
+            body.update(legacy_fields or {})
+            return body
+
+        search_filter: dict[str, Any] = {
+            "type": {"eq": "IMAGE"},
+            "trashedAt": {"eq": None},
+            "visibility": {
+                "in": ["timeline", "archive"] if include_archived else ["timeline"]
+            },
+            "originalFileName": {"notLike": APPLEDOUBLE_NAME_PATTERN},
+        }
+        for key, value in (conditions or {}).items():
+            search_filter[key] = dict(value) if isinstance(value, dict) else value
+
+        # A key appears once per filter object: merge `none` into an existing
+        # IdsFilter (e.g. `albumIds: {any: [a], none: [b]}`).
+        for key, ids in (
+            ("albumIds", exclude_album_ids),
+            ("personIds", exclude_person_ids),
+        ):
+            ids = sorted(set(ids))
+            if ids:
+                search_filter.setdefault(key, {})["none"] = ids
+
+        body["filter"] = search_filter
+        return body
+
+    @staticmethod
+    def _favorite_fields(favorites_filter: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return (structured conditions, legacy fields) for a favorites filter."""
+        if favorites_filter == "only":
+            return {"isFavorite": {"eq": True}}, {"isFavorite": True}
+        if favorites_filter == "exclude":
+            return {"isFavorite": {"eq": False}}, {"isFavorite": False}
+        return {}, {}
+
     async def search_random_recent(
         self,
         days: int = 90,
         count: int = 10,
         favorites_filter: str = "all",
+        *,
+        include_archived: bool = False,
+        exclude_album_ids: Iterable[str] = (),
+        exclude_person_ids: Iterable[str] = (),
     ) -> list[dict[str, Any]]:
-        """Get random images from the last X days.
+        """Get random images taken within the last X days.
 
         Args:
             days: Number of days to look back
             count: Number of random images to fetch
             favorites_filter: "all" (no filter), "only" (favorites only), "exclude" (no favorites)
+            include_archived: Also draw archived assets
+            exclude_album_ids: Albums to exclude (server-side on Immich 3.2+)
+            exclude_person_ids: Persons to exclude (server-side on Immich 3.2+)
 
         Returns:
-            List of asset dictionaries with id, originalWidth, originalHeight, etc.
+            List of asset dictionaries (with exifInfo and people).
         """
-        # Immich v3 validates date filters as ISO-8601 UTC datetimes (zod
-        # .datetime(), trailing 'Z' required). A naive isoformat() with
-        # microseconds and no 'Z' is rejected with HTTP 400.
-        taken_after = (datetime.now() - timedelta(days=days)).strftime(
-            "%Y-%m-%dT%H:%M:%S.000Z"
+        await self._ensure_search_api()
+        taken_after = self._utc_days_ago(days)
+        conditions, legacy_fields = self._favorite_fields(favorites_filter)
+
+        body = self._build_search_body(
+            count,
+            include_archived=include_archived,
+            exclude_album_ids=exclude_album_ids,
+            exclude_person_ids=exclude_person_ids,
+            conditions={**conditions, "takenAt": {"gte": taken_after}},
+            legacy_fields={**legacy_fields, "takenAfter": taken_after},
         )
+        return await self._post_search_random(body)
 
-        json_body: dict[str, Any] = {
-            "takenAfter": taken_after,
-            "type": "IMAGE",
-            "size": count,
-        }
+    async def search_random_recent_boost(
+        self,
+        days: int = 7,
+        count: int = 10,
+        favorites_filter: str = "all",
+        *,
+        include_archived: bool = False,
+        exclude_album_ids: Iterable[str] = (),
+        exclude_person_ids: Iterable[str] = (),
+    ) -> list[dict[str, Any]]:
+        """Get random images taken OR uploaded within the last X days.
 
-        # Apply favorites filter
-        if favorites_filter == "only":
-            json_body["isFavorite"] = True
-        elif favorites_filter == "exclude":
-            json_body["isFavorite"] = False
+        - taken    → EXIF capture date within the window (fresh shots)
+        - uploaded → DB record creation = upload/import date within the window
+          (old scans imported yesterday). Note: ``importedAfter`` does NOT
+          exist — the flat API silently ignores unknown keys.
 
-        url = f"{self._host}/api/search/random"
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                session = await self._get_session()
-                async with session.post(
-                    url,
-                    headers=self._headers(),
-                    json=json_body,
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                        "Failed to fetch random images (attempt %d/%d): %s",
-                        attempt + 1, MAX_RETRIES, response.status
-                    )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                    "Error fetching random images (attempt %d/%d): %s",
-                    attempt + 1, MAX_RETRIES, err
-                )
-
-            # Wait before retry
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
-
-        _LOGGER.error("All retries failed for search_random_recent")
-        return []
-
-    async def download_asset(self, asset_id: str, thumbnail: bool = False) -> bytes | None:
-        """Download an asset from Immich.
+        Immich 3.2+: one request with ``or: [{takenAt}, {createdAt}]`` (true
+        union, verified live). Older servers combine flat filters with AND only,
+        so the union is approximated with two parallel requests merged and
+        deduplicated.
 
         Args:
-            asset_id: The ID of the asset to download
-            thumbnail: If True, download thumbnail instead of original
+            days: Boost window in days (photos taken or uploaded since then).
+            count: Number of random images to return.
+            favorites_filter: "all", "only" (favorites only), "exclude".
+            include_archived: Also draw archived assets
+            exclude_album_ids: Albums to exclude (server-side on Immich 3.2+)
+            exclude_person_ids: Persons to exclude (server-side on Immich 3.2+)
 
         Returns:
-            Image bytes or None if failed
+            List of asset dicts (size <= count), deduplicated by id. Empty
+            list when no photo falls inside the window.
         """
-        endpoint = "thumbnail" if thumbnail else "original"
-        url = f"{self._host}/api/assets/{asset_id}/{endpoint}"
+        if days <= 0 or count <= 0:
+            return []
 
+        await self._ensure_search_api()
+        after = self._utc_days_ago(days)
+        conditions, legacy_fields = self._favorite_fields(favorites_filter)
+        common = {
+            "include_archived": include_archived,
+            "exclude_album_ids": exclude_album_ids,
+            "exclude_person_ids": exclude_person_ids,
+        }
+
+        if self.supports_search_v2:
+            body = self._build_search_body(
+                count,
+                **common,
+                conditions={
+                    **conditions,
+                    "or": [
+                        {"takenAt": {"gte": after}},
+                        {"createdAt": {"gte": after}},
+                    ],
+                },
+            )
+            return await self._post_search_random(body)
+
+        taken_body = self._build_search_body(
+            count, **common, legacy_fields={**legacy_fields, "takenAfter": after}
+        )
+        created_body = self._build_search_body(
+            count, **common, legacy_fields={**legacy_fields, "createdAfter": after}
+        )
+
+        taken_assets, created_assets = await asyncio.gather(
+            self._post_search_random(taken_body),
+            self._post_search_random(created_body),
+        )
+
+        combined: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for asset in taken_assets + created_assets:
+            asset_id = asset.get("id")
+            if asset_id and asset_id not in seen_ids:
+                seen_ids.add(asset_id)
+                combined.append(asset)
+
+        random.shuffle(combined)
+        return combined[:count]
+
+    async def _download(
+        self, url: str, asset_id: str
+    ) -> tuple[int | None, bytes | None]:
+        """GET an asset file with retries.
+
+        Returns (last_status, bytes). Statuses that won't change on retry
+        (401/403/404...) return immediately; status is None when only
+        connection errors occurred.
+        """
+        status: int | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 session = await self._get_session()
                 async with session.get(url, headers=self._headers()) as response:
-                    if response.status != 200:
-                        (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                            "Failed to download asset %s (attempt %d/%d): %s",
-                            asset_id, attempt + 1, MAX_RETRIES, response.status
-                        )
-                    else:
+                    status = response.status
+                    if response.status == 200:
                         content_type = response.headers.get("content-type", "")
                         if "image" not in content_type:
                             _LOGGER.warning(
                                 "Unexpected content type for asset %s: %s",
                                 asset_id, content_type
                             )
-                            return None
-                        return await response.read()
+                            return status, None
+                        return status, await response.read()
+                    if response.status in NO_RETRY_STATUSES:
+                        _LOGGER.debug(
+                            "Download of asset %s failed: %s (not retried)",
+                            asset_id, response.status
+                        )
+                        return status, None
+                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
+                        "Failed to download asset %s (attempt %d/%d): %s",
+                        asset_id, attempt + 1, MAX_RETRIES, response.status
+                    )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                     "Error downloading asset %s (attempt %d/%d): %s",
@@ -308,8 +511,67 @@ class ImmichHub:
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
 
-        _LOGGER.error("All retries failed for download_asset %s", asset_id)
-        return None
+        _LOGGER.error("All retries failed for download of asset %s", asset_id)
+        return status, None
+
+    async def download_asset(self, asset_id: str, thumbnail: bool = False) -> bytes | None:
+        """Download an asset from Immich.
+
+        Args:
+            asset_id: The ID of the asset to download
+            thumbnail: If True, download thumbnail instead of original
+
+        Returns:
+            Image bytes or None if failed (a 404 — e.g. original missing on
+            the server's disk — returns None at once, without retries)
+        """
+        endpoint = "thumbnail" if thumbnail else "original"
+        status, data = await self._download(
+            f"{self._host}/api/assets/{asset_id}/{endpoint}", asset_id
+        )
+        if status == 404:
+            _LOGGER.warning("Asset %s file not found on the server (404)", asset_id)
+        return data
+
+    async def download_image(
+        self, asset_id: str, size: str = "fullsize"
+    ) -> bytes | None:
+        """Download a decodable rendition of an asset for display.
+
+        Uses /api/assets/{id}/thumbnail?size=<size> (needs asset.view):
+        - "fullsize": Immich converts non web-compatible formats (HEIC, PSD,
+          RAW...) to JPEG when fullsize generation is enabled, else downgrades
+          to the preview. Caveat: Immich decides by the file EXTENSION, so a
+          web-compatible name (a HEIC saved as .jpg, a 200 MP .jpg panorama)
+          is served as the original file.
+        - "preview": always a server-generated, downscaled JPEG — the fallback
+          when a fullsize/original still can't be decoded.
+
+        If the API key lacks asset.view (401/403), this is remembered, logged
+        once, and this and all later calls fall back to /original.
+
+        Returns:
+            Image bytes, or None on failure (404 returns None without retries).
+        """
+        if not self._asset_view_denied:
+            status, data = await self._download(
+                f"{self._host}/api/assets/{asset_id}/thumbnail?size={size}",
+                asset_id,
+            )
+            if status in (401, 403):
+                self._asset_view_denied = True
+                _LOGGER.info(
+                    "API key lacks the asset.view permission: downloading "
+                    "originals instead of converted renditions (HEIC and "
+                    "other non-web formats may fail to decode)"
+                )
+            else:
+                if status == 404:
+                    _LOGGER.warning(
+                        "Asset %s file not found on the server (404)", asset_id
+                    )
+                return data
+        return await self.download_asset(asset_id)
 
     @property
     def api_key(self) -> str:
@@ -355,17 +617,17 @@ class ImmichHub:
         """
         if for_date is None:
             for_date = datetime.now().strftime("%Y-%m-%d")
-        # Immich v3 validates `for` as an ISO-8601 UTC datetime (zod .datetime(),
-        # trailing 'Z' required, ms precision). A bare "YYYY-MM-DD" — or a naive
-        # isoformat() with microseconds and no 'Z' — is rejected with HTTP 400.
-        # Only the date matters for "on this day", so we pin midnight UTC.
-        if len(for_date) == 10:
-            for_date = f"{for_date}T00:00:00.000Z"
 
         url = f"{self._host}/api/memories"
-        params = {"type": "on_this_day", "for": for_date}
+        # Candidate formats for the `for` param. Immich v3.1+ validates it as a
+        # plain ISO date (YYYY-MM-DD) and rejects datetime strings with HTTP
+        # 400, while some earlier v3 builds required a full UTC datetime with
+        # trailing 'Z'. Try the modern plain-date form first and fall back to
+        # the legacy datetime form on a 400.
+        candidates = [for_date[:10], f"{for_date[:10]}T00:00:00.000Z"]
 
         for attempt in range(MAX_RETRIES):
+            params = {"type": "on_this_day", "for": candidates[0]}
             try:
                 session = await self._get_session()
                 async with session.get(
@@ -373,6 +635,14 @@ class ImmichHub:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
+                    if response.status == 400 and len(candidates) > 1:
+                        _LOGGER.debug(
+                            "Memories 'for=%s' rejected (400), retrying with "
+                            "legacy datetime format",
+                            candidates[0],
+                        )
+                        candidates.pop(0)
+                        continue  # Retry immediately with the other format
                     (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed to fetch memories (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status
@@ -595,7 +865,12 @@ class ImmichHub:
     async def _post_search_random(
         self, body: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """POST /api/search/random with retries. Returns [] on failure."""
+        """POST /api/search/random with retries. Returns [] on failure.
+
+        A 400 is never transient and isn't retried. On the structured API it
+        typically means an album id unknown to the server (deleted album left
+        in the options): that is reported once per id set.
+        """
         url = f"{self._host}/api/search/random"
         for attempt in range(MAX_RETRIES):
             try:
@@ -605,6 +880,13 @@ class ImmichHub:
                 ) as response:
                     if response.status == 200:
                         return await response.json()
+                    if response.status == 400:
+                        try:
+                            message = (await response.json()).get("message", "")
+                        except (aiohttp.ClientError, ValueError, AttributeError):
+                            message = ""
+                        self._warn_rejected_search(body, message)
+                        return []
                     (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
                         "Failed search/random (attempt %d/%d): %s",
                         attempt + 1, MAX_RETRIES, response.status,
@@ -619,16 +901,42 @@ class ImmichHub:
         _LOGGER.error("All retries failed for search/random")
         return []
 
+    def _warn_rejected_search(self, body: dict[str, Any], message: Any) -> None:
+        """Log a rejected (400) search — once per album id set when albums are involved."""
+        album_filter = (body.get("filter") or {}).get("albumIds") or {}
+        album_ids = frozenset(
+            aid
+            for op in ("any", "all", "none")
+            for aid in album_filter.get(op, [])
+        )
+        if not album_ids:
+            _LOGGER.warning("Immich rejected search/random (400): %s", message)
+            return
+        if album_ids in self._warned_rejected_albums:
+            return
+        self._warned_rejected_albums.add(album_ids)
+        _LOGGER.warning(
+            "Immich rejected search/random (400: %s). An album id may be "
+            "deleted or not readable by the API key: %s",
+            message,
+            ", ".join(sorted(album_ids)),
+        )
+
     async def search_random_from_albums(
         self,
         album_ids: list[str],
         count: int = 50,
+        *,
+        include_archived: bool = False,
+        exclude_album_ids: Iterable[str] = (),
+        exclude_person_ids: Iterable[str] = (),
     ) -> list[dict[str, Any]]:
         """Search random images across multiple albums.
 
-        Workaround: Immich's `albumIds` filter is AND (intersection), not OR
-        (union). To approximate OR semantics, we issue one call per album in
-        parallel and combine the results.
+        One call per album, in parallel, combined: keeps exposure balanced
+        across albums (a single `albumIds: {any: [...]}` query on Immich 3.2+
+        would weight albums by size) and allows `_album_id` attribution. On the
+        legacy flat API `albumIds` is AND-only anyway.
 
         For efficiency when count is small relative to len(album_ids), only a
         random subset of albums is queried (e.g. count=1 → 1 album sampled).
@@ -641,6 +949,9 @@ class ImmichHub:
         Args:
             album_ids: List of album UUIDs to search within.
             count: Total number of random images to return.
+            include_archived: Also draw archived assets
+            exclude_album_ids: Albums to exclude (server-side on Immich 3.2+)
+            exclude_person_ids: Persons to exclude (server-side on Immich 3.2+)
 
         Returns:
             List of asset dicts (size <= count), each tagged with `_album_id`.
@@ -648,16 +959,23 @@ class ImmichHub:
         if not album_ids or count <= 0:
             return []
 
+        await self._ensure_search_api()
         n_to_query = min(count, len(album_ids))
         selected_ids = random.sample(album_ids, n_to_query)
         per_id = math.ceil(count / n_to_query)
         sem = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
 
         async def fetch_one(aid: str) -> list[dict[str, Any]]:
+            body = self._build_search_body(
+                per_id,
+                include_archived=include_archived,
+                exclude_album_ids=exclude_album_ids,
+                exclude_person_ids=exclude_person_ids,
+                conditions={"albumIds": {"any": [aid]}},
+                legacy_fields={"albumIds": [aid]},
+            )
             async with sem:
-                assets = await self._post_search_random(
-                    {"albumIds": [aid], "type": "IMAGE", "size": per_id}
-                )
+                assets = await self._post_search_random(body)
             for a in assets:
                 a["_album_id"] = aid
             return assets
@@ -667,64 +985,21 @@ class ImmichHub:
         random.shuffle(combined)
         return combined[:count]
 
-    async def search_random_in_any_album(
-        self,
-        count: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Search random images that belong to at least one album.
-
-        Uses isNotInAlbum: false to filter for photos in any album,
-        without needing to specify album IDs.
-
-        Args:
-            count: Number of random images to fetch
-
-        Returns:
-            List of asset dictionaries.
-        """
-        url = f"{self._host}/api/search/random"
-        json_body: dict[str, Any] = {
-            "isNotInAlbum": False,
-            "type": "IMAGE",
-            "size": count,
-        }
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                session = await self._get_session()
-                async with session.post(
-                    url,
-                    headers=self._headers(),
-                    json=json_body,
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                        "Failed to search any album (attempt %d/%d): %s",
-                        attempt + 1, MAX_RETRIES, response.status
-                    )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                (_LOGGER.warning if attempt + 1 == MAX_RETRIES else _LOGGER.debug)(
-                    "Error searching any album (attempt %d/%d): %s",
-                    attempt + 1, MAX_RETRIES, err
-                )
-
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
-
-        _LOGGER.error("All retries failed for search_random_in_any_album")
-        return []
-
     async def search_random_by_person(
         self,
         person_ids: list[str],
         count: int = 50,
+        *,
+        include_archived: bool = False,
+        exclude_album_ids: Iterable[str] = (),
+        exclude_person_ids: Iterable[str] = (),
     ) -> list[dict[str, Any]]:
         """Search random images containing any of the given persons.
 
-        Workaround: Immich's `personIds` filter is AND (asset must contain ALL
-        listed persons), not OR. To approximate OR semantics, we issue one call
-        per person in parallel and combine the results.
+        One call per person, in parallel, combined: keeps exposure balanced
+        across persons (a single `personIds: {any: [...]}` query on Immich 3.2+
+        would weight persons by photo count). On the legacy flat API
+        `personIds` is AND-only anyway.
 
         For efficiency when count is small relative to len(person_ids), only a
         random subset of persons is queried (e.g. count=1 → 1 person sampled).
@@ -734,6 +1009,9 @@ class ImmichHub:
         Args:
             person_ids: List of person UUIDs to search for.
             count: Total number of random images to return.
+            include_archived: Also draw archived assets
+            exclude_album_ids: Albums to exclude (server-side on Immich 3.2+)
+            exclude_person_ids: Persons to exclude (server-side on Immich 3.2+)
 
         Returns:
             List of asset dicts (size <= count), each containing at least one
@@ -742,16 +1020,23 @@ class ImmichHub:
         if not person_ids or count <= 0:
             return []
 
+        await self._ensure_search_api()
         n_to_query = min(count, len(person_ids))
         selected_ids = random.sample(person_ids, n_to_query)
         per_id = math.ceil(count / n_to_query)
         sem = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
 
         async def fetch_one(pid: str) -> list[dict[str, Any]]:
+            body = self._build_search_body(
+                per_id,
+                include_archived=include_archived,
+                exclude_album_ids=exclude_album_ids,
+                exclude_person_ids=exclude_person_ids,
+                conditions={"personIds": {"any": [pid]}},
+                legacy_fields={"personIds": [pid]},
+            )
             async with sem:
-                assets = await self._post_search_random(
-                    {"personIds": [pid], "type": "IMAGE", "size": per_id, "withPeople": True}
-                )
+                assets = await self._post_search_random(body)
             # Client-side verify: keep only assets that actually contain pid.
             # The Immich API has had bugs returning unrelated assets in the past
             # (see GitHub #15010), so this is a defensive filter.

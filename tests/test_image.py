@@ -29,13 +29,16 @@ def mock_hub() -> AsyncMock:
     hub._host = "http://immich.local:2283"
     hub.authenticate.return_value = True
     hub.close.return_value = None
+    hub.supports_search_v2 = True
     hub.search_random_recent.return_value = []
+    hub.search_random_recent_boost.return_value = []
     hub.get_memory_assets.return_value = []
     hub.search_random_from_albums.return_value = []
-    hub.search_random_in_any_album.return_value = []
     hub.search_random_by_person.return_value = []
+    hub.get_users.return_value = []
+    hub.get_albums.return_value = []
     hub.get_asset_info.return_value = None
-    hub.download_asset.return_value = None
+    hub.download_image.return_value = None
     return hub
 
 
@@ -454,27 +457,29 @@ def test_manager_pop_from_pool_portrait_only_no_portraits(
 
 
 def test_manager_apply_global_exclusions_by_album(mock_hub: AsyncMock) -> None:
-    """Test assets in excluded albums are filtered out."""
+    """Assets drawn from an excluded album (`_album_id`) are filtered out.
+
+    Immich never returns the albums an asset belongs to, so the client-side
+    net can only rely on the album the asset was drawn from.
+    """
     manager = SlideshowManager(
         hub=mock_hub,
         dual_portrait=False,
         exclude_albums=["album-bad"],
     )
 
-    asset_good = create_landscape_asset("asset-1")
-    asset_good["albumIds"] = ["album-good"]
+    asset_recent = create_landscape_asset("asset-1")
 
     asset_bad = create_landscape_asset("asset-2")
-    asset_bad["albumIds"] = ["album-bad"]
+    asset_bad["_album_id"] = "album-bad"
 
-    asset_also_bad = create_landscape_asset("asset-3")
-    asset_also_bad["_album_id"] = "album-bad"
+    asset_other_album = create_landscape_asset("asset-3")
+    asset_other_album["_album_id"] = "album-good"
 
-    assets = [asset_good, asset_bad, asset_also_bad]
+    assets = [asset_recent, asset_bad, asset_other_album]
     filtered = manager._apply_global_exclusions(assets)
 
-    assert len(filtered) == 1
-    assert filtered[0]["id"] == "asset-1"
+    assert [a["id"] for a in filtered] == ["asset-1", "asset-3"]
 
 
 def test_manager_apply_global_exclusions_by_person(mock_hub: AsyncMock) -> None:
@@ -678,7 +683,6 @@ async def test_manager_refill_pool_success(
             "isFavorite": False,
             "localDateTime": "2024-01-15T12:00:00",
             "people": [],
-            "albumIds": [],
         }
 
     mock_hub.get_asset_info.side_effect = mock_asset_info
@@ -711,7 +715,7 @@ async def test_manager_refill_pool_all_filtered_by_exclusions(
         dual_portrait=False,
         source_recent_weight=100,
         source_memories_weight=0,
-        exclude_albums=["album-1"],
+        exclude_persons=["person-1"],
     )
 
     # Return assets that will all be filtered
@@ -719,12 +723,11 @@ async def test_manager_refill_pool_all_filtered_by_exclusions(
         {"id": "asset-1", "type": "IMAGE"},
     ]
 
-    # Asset info shows it's in excluded album
+    # Asset info shows it contains an excluded person
     mock_hub.get_asset_info.return_value = {
         "id": "asset-1",
         "exifInfo": {"exifImageWidth": 4000, "exifImageHeight": 3000},
-        "albumIds": ["album-1"],
-        "people": [],
+        "people": [{"id": "person-1", "name": "Excluded"}],
     }
 
     await manager._refill_pool()
@@ -778,7 +781,11 @@ async def test_manager_fetch_albums_with_specific_albums(
     result = await manager._fetch_albums(count=10)
 
     mock_hub.search_random_from_albums.assert_called_with(
-        album_ids=["album-1", "album-2"], count=10
+        album_ids=["album-1", "album-2"],
+        count=10,
+        include_archived=False,
+        exclude_album_ids=[],
+        exclude_person_ids=[],
     )
     assert len(result) == 1
     assert result[0]["_source"] == "album"
@@ -787,10 +794,9 @@ async def test_manager_fetch_albums_with_specific_albums(
 async def test_manager_fetch_albums_any_album(mock_hub: AsyncMock) -> None:
     """Test _fetch_albums in any-album mode fans out across the cached album list.
 
-    Avoids Immich's broken `isNotInAlbum: false` filter (returns assets that
-    aren't actually in any album). Instead, uses the manager's _album_names
-    cache as the album pool and lets `search_random_from_albums` do the
-    fan-out + per-asset _album_id tagging.
+    Uses the manager's _album_names cache as the album pool and lets
+    `search_random_from_albums` do the balanced fan-out + per-asset _album_id
+    tagging.
     """
     manager = SlideshowManager(
         hub=mock_hub,
@@ -811,8 +817,6 @@ async def test_manager_fetch_albums_any_album(mock_hub: AsyncMock) -> None:
     call_kwargs = mock_hub.search_random_from_albums.call_args.kwargs
     assert set(call_kwargs["album_ids"]) == {"album-A", "album-B"}
     assert call_kwargs["count"] == 10
-    # search_random_in_any_album must NOT be called any more
-    mock_hub.search_random_in_any_album.assert_not_called()
     assert len(result) == 1
     assert result[0]["_source"] == "album"
 
@@ -861,7 +865,11 @@ async def test_manager_fetch_persons_with_selection(mock_hub: AsyncMock) -> None
     result = await manager._fetch_persons(count=10)
 
     mock_hub.search_random_by_person.assert_called_with(
-        person_ids=["person-1", "person-2"], count=10
+        person_ids=["person-1", "person-2"],
+        count=10,
+        include_archived=False,
+        exclude_album_ids=[],
+        exclude_person_ids=[],
     )
     assert len(result) == 1
     assert result[0]["_source"] == "person"
@@ -907,12 +915,12 @@ async def test_manager_refresh_cold_start(
     manager._asset_pool = [create_landscape_asset("asset-1")]
 
     test_image_bytes = create_test_image(4000, 3000)
-    mock_hub.download_asset.return_value = test_image_bytes
+    mock_hub.download_image.return_value = test_image_bytes
 
     result = await manager.refresh()
 
     assert result is True
-    mock_hub.download_asset.assert_called()
+    mock_hub.download_image.assert_called()
 
 
 async def test_manager_prefetch_single_image(
@@ -924,7 +932,7 @@ async def test_manager_prefetch_single_image(
     manager._asset_pool = [landscape]
 
     test_image_bytes = create_test_image(4000, 3000)
-    mock_hub.download_asset.return_value = test_image_bytes
+    mock_hub.download_image.return_value = test_image_bytes
 
     await manager._prefetch_next()
 
@@ -945,7 +953,7 @@ async def test_manager_prefetch_dual_portrait(
 
     # Create portrait test images
     portrait_bytes = create_test_image(3000, 4000)
-    mock_hub.download_asset.return_value = portrait_bytes
+    mock_hub.download_image.return_value = portrait_bytes
 
     await manager._prefetch_next()
 
@@ -1240,3 +1248,600 @@ def test_manager_asset2_property(manager: SlideshowManager) -> None:
     manager._current_asset2 = asset
 
     assert manager.asset2 == asset
+
+
+# =============================================================================
+# Immich 3.2 search filters (include_archived, exclusions, stale album ids)
+# =============================================================================
+
+
+async def test_manager_include_archived_passed_to_recent_searches(
+    mock_hub: AsyncMock,
+) -> None:
+    """include_archived + exclusions reach both the boost and classic queries."""
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        recent_boost_days=7,
+        recent_boost_share=40,
+        exclude_albums=["album-z", "album-a"],
+        exclude_persons=["person-x"],
+        include_archived=True,
+    )
+
+    await manager._fetch_recent(count=10)
+
+    expected = {
+        "include_archived": True,
+        "exclude_album_ids": ["album-a", "album-z"],
+        "exclude_person_ids": ["person-x"],
+    }
+    boost_kwargs = mock_hub.search_random_recent_boost.call_args.kwargs
+    classic_kwargs = mock_hub.search_random_recent.call_args.kwargs
+    for key, value in expected.items():
+        assert boost_kwargs[key] == value
+        assert classic_kwargs[key] == value
+
+
+async def test_manager_include_archived_defaults_to_false(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """Archived photos are excluded unless explicitly enabled."""
+    manager._recent_boost_days = 0
+
+    await manager._fetch_recent(count=5)
+
+    assert mock_hub.search_random_recent.call_args.kwargs["include_archived"] is False
+
+
+async def test_manager_exclusions_passed_to_album_search(mock_hub: AsyncMock) -> None:
+    """Album fan-out receives the server-side exclusion filters."""
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        albums_include=["album-1"],
+        exclude_albums=["album-2"],
+        exclude_persons=["person-9"],
+    )
+
+    await manager._fetch_albums(count=5)
+
+    kwargs = mock_hub.search_random_from_albums.call_args.kwargs
+    assert kwargs["album_ids"] == ["album-1"]
+    assert kwargs["exclude_album_ids"] == ["album-2"]
+    assert kwargs["exclude_person_ids"] == ["person-9"]
+    assert kwargs["include_archived"] is False
+
+
+async def test_manager_sanitizes_stale_album_ids_once(
+    mock_hub: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deleted albums are dropped from includes and exclusions, warned once."""
+    mock_hub.get_albums.return_value = [
+        {"id": "album-A", "albumName": "A"},
+        {"id": "album-B", "albumName": "B"},
+    ]
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        source_recent_weight=100,
+        source_memories_weight=0,
+        albums_include=["album-A", "gone-1"],
+        exclude_albums=["album-B", "gone-2"],
+    )
+
+    await manager._refill_pool()
+    await manager._refill_pool()
+
+    assert manager._albums_include == ["album-A"]
+    assert manager._exclude_albums == {"album-B"}
+    warnings = [r for r in caplog.records if "no longer exist" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "gone-1" in warnings[0].getMessage()
+    assert "gone-2" in warnings[0].getMessage()
+    assert mock_hub.search_random_recent.call_args.kwargs["exclude_album_ids"] == ["album-B"]
+
+
+async def test_manager_keeps_album_ids_when_album_list_unknown(
+    mock_hub: AsyncMock,
+) -> None:
+    """Without album.read (empty album list) configured ids are kept as-is."""
+    mock_hub.get_albums.return_value = []
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        albums_include=["album-1"],
+        exclude_albums=["album-2"],
+    )
+
+    await manager._refill_pool()
+
+    assert manager._albums_include == ["album-1"]
+    assert manager._exclude_albums == {"album-2"}
+
+
+async def test_manager_fetch_albums_all_selected_albums_deleted(
+    mock_hub: AsyncMock,
+) -> None:
+    """If every selected album is gone, don't silently widen to all albums."""
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        albums_include=["gone-1"],
+    )
+    manager._album_names = {"album-A": "A"}
+    manager._albums_fetched = True
+    manager._sanitize_album_ids()
+
+    result = await manager._fetch_albums(count=10)
+
+    assert result == []
+    mock_hub.search_random_from_albums.assert_not_called()
+
+
+# =============================================================================
+# Enrichment skip
+# =============================================================================
+
+
+async def test_manager_refill_skips_enrichment_when_exif_present(
+    mock_hub: AsyncMock,
+) -> None:
+    """Search results carrying exif dimensions need no per-asset GET."""
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        source_recent_weight=50,
+        source_memories_weight=50,
+        recent_boost_days=0,
+    )
+    mock_hub.search_random_recent.return_value = [create_portrait_asset("searched")]
+    mock_hub.get_memory_assets.return_value = [
+        {"id": "memory-1", "type": "IMAGE", "memory_year": 2020}
+    ]
+    mock_hub.get_asset_info.return_value = {
+        "id": "memory-1",
+        "exifInfo": {"exifImageWidth": 4000, "exifImageHeight": 3000},
+        "originalFileName": "memory-1.jpg",
+        "people": [],
+    }
+
+    await manager._refill_pool()
+
+    mock_hub.get_asset_info.assert_called_once_with("memory-1")
+    pool = {a["id"]: a for a in manager._asset_pool}
+    assert pool["searched"]["originalWidth"] == 3000
+    assert pool["searched"]["originalHeight"] == 4000
+    assert pool["searched"]["originalFileName"] == "searched.jpg"
+    assert pool["memory-1"]["originalWidth"] == 4000
+
+
+# =============================================================================
+# Undisplayable ("bad") assets
+# =============================================================================
+
+
+def _bytes_by_id(mapping: dict[str, bytes | None], previews: dict[str, bytes] | None = None):
+    """side_effect for hub.download_image returning bytes per asset id.
+
+    `mapping` answers the default (fullsize) request; `previews` the
+    size="preview" retry (defaults to the same bytes as `mapping`).
+    """
+
+    async def _download(asset_id: str, size: str = "fullsize") -> bytes | None:
+        if size == "preview" and previews is not None:
+            return previews.get(asset_id)
+        return mapping.get(asset_id)
+
+    return _download
+
+
+async def test_manager_decode_failure_marks_bad_and_tries_next(
+    mock_hub: AsyncMock, manager: SlideshowManager, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An undecodable file is skipped without losing the display slot."""
+    manager._asset_pool = [
+        create_landscape_asset("heic-as-jpg"),
+        create_landscape_asset("good"),
+    ]
+    mock_hub.download_image.side_effect = _bytes_by_id(
+        {"heic-as-jpg": b"\x00\x00\x00\x18ftypheic", "good": create_test_image(400, 300)}
+    )
+
+    await manager._prefetch_next()
+
+    assert manager._next_asset1["id"] == "good"
+    assert "heic-as-jpg" in manager._bad_assets
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("heic-as-jpg" in m and "heic-as-jpg.jpg" in m for m in messages)
+
+
+async def test_manager_decode_failure_uses_preview_rendition(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """A file served as-is but undecodable is displayed from its preview."""
+    manager._asset_pool = [create_landscape_asset("heic-as-jpg")]
+    mock_hub.download_image.side_effect = _bytes_by_id(
+        {"heic-as-jpg": b"\x00\x00\x00\x18ftypheic"},
+        previews={"heic-as-jpg": create_test_image(400, 300)},
+    )
+
+    await manager._prefetch_next()
+
+    assert manager._next_asset1["id"] == "heic-as-jpg"
+    assert manager._bad_assets == {}
+    sizes = [c.kwargs.get("size", "fullsize") for c in mock_hub.download_image.await_args_list]
+    assert sizes == ["fullsize", "preview"]
+
+
+async def test_manager_decompression_bomb_marks_bad(
+    mock_hub: AsyncMock, manager: SlideshowManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A panorama above Pillow's pixel limit is treated as undisplayable."""
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    manager._asset_pool = [create_landscape_asset("panorama")]
+    mock_hub.download_image.side_effect = _bytes_by_id(
+        {"panorama": create_test_image(400, 300)}
+    )
+
+    result = await manager.refresh()
+
+    assert result is False
+    assert "panorama" in manager._bad_assets
+
+
+async def test_manager_download_failure_needs_two_strikes(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """A single failed download may be transient: blacklist on the second."""
+    asset = create_landscape_asset("missing-original")
+    mock_hub.download_image.return_value = None
+
+    assert await manager._load_asset_image(asset) is None
+    assert "missing-original" not in manager._bad_assets
+    assert manager._download_failures["missing-original"] == 1
+
+    assert await manager._load_asset_image(asset) is None
+    assert "missing-original" in manager._bad_assets
+    assert "missing-original" not in manager._download_failures
+
+
+async def test_manager_download_success_resets_strikes(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """A transient failure followed by a success leaves the asset usable."""
+    asset = create_landscape_asset("flaky")
+    mock_hub.download_image.return_value = None
+    await manager._load_asset_image(asset)
+
+    mock_hub.download_image.return_value = create_test_image(400, 300)
+    img = await manager._load_asset_image(asset)
+
+    assert img is not None
+    assert "flaky" not in manager._download_failures
+    assert "flaky" not in manager._bad_assets
+
+
+async def test_manager_retry_is_bounded(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """At most MAX_DISPLAY_ATTEMPTS assets are tried per display slot."""
+    from custom_components.immich_slideshow.const import MAX_DISPLAY_ATTEMPTS
+
+    manager._asset_pool = [
+        create_landscape_asset(f"broken-{i}") for i in range(MAX_DISPLAY_ATTEMPTS + 2)
+    ]
+    mock_hub.download_image.return_value = b"garbage"
+
+    loaded = await manager._load_next_display()
+
+    assert loaded is None
+    # Each attempt = fullsize download + one preview retry
+    assert mock_hub.download_image.await_count == 2 * MAX_DISPLAY_ATTEMPTS
+    assert len(manager._asset_pool) == 2
+
+
+async def test_manager_dual_portrait_partial_failure(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """Only the failing portrait is dropped; another partner is used."""
+    manager._asset_pool = [
+        create_portrait_asset("p1"),
+        create_portrait_asset("p2-broken"),
+        create_portrait_asset("p3"),
+    ]
+    portrait = create_test_image(300, 400)
+    mock_hub.download_image.side_effect = _bytes_by_id(
+        {"p1": portrait, "p2-broken": b"garbage", "p3": portrait}
+    )
+
+    await manager._prefetch_next()
+
+    assert manager._next_is_dual is True
+    assert manager._next_asset1["id"] == "p1"
+    assert manager._next_asset2["id"] == "p3"
+    assert set(manager._bad_assets) == {"p2-broken"}
+
+
+async def test_manager_dual_portrait_falls_back_to_single(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """If no partner portrait can be decoded, the first one shows alone."""
+    manager._asset_pool = [
+        create_portrait_asset("p1"),
+        create_portrait_asset("p2-broken"),
+    ]
+    mock_hub.download_image.side_effect = _bytes_by_id(
+        {"p1": create_test_image(300, 400), "p2-broken": b"garbage"}
+    )
+
+    await manager._prefetch_next()
+
+    assert manager._next_is_dual is False
+    assert manager._next_asset1["id"] == "p1"
+    assert manager._next_img2 is None
+
+
+async def test_manager_bad_assets_excluded_at_refill_and_pop(
+    mock_hub: AsyncMock,
+) -> None:
+    """Known bad assets never enter the pool, and are dropped if already in it."""
+    import time as time_mod
+
+    manager = SlideshowManager(
+        hub=mock_hub,
+        dual_portrait=False,
+        source_recent_weight=100,
+        source_memories_weight=0,
+        recent_boost_days=0,
+    )
+    manager._bad_assets = {"bad-1": time_mod.time(), "bad-2": time_mod.time()}
+    mock_hub.search_random_recent.return_value = [
+        create_landscape_asset("bad-1"),
+        create_landscape_asset("ok-1"),
+    ]
+
+    await manager._refill_pool()
+    assert [a["id"] for a in manager._asset_pool] == ["ok-1"]
+
+    manager._asset_pool = [create_landscape_asset("bad-2"), create_landscape_asset("ok-2")]
+    popped = manager._pop_from_pool(count=1)
+    assert popped[0]["id"] == "ok-2"
+    assert manager._asset_pool == []
+
+
+def test_manager_bad_asset_ttl(manager: SlideshowManager) -> None:
+    """Bad-asset entries expire after BAD_ASSET_TTL_HOURS."""
+    import time as time_mod
+
+    from custom_components.immich_slideshow.const import BAD_ASSET_TTL_HOURS
+
+    now = time_mod.time()
+    manager._bad_assets = {
+        "fresh": now - 3600,
+        "expired": now - (BAD_ASSET_TTL_HOURS + 1) * 3600,
+    }
+
+    assert manager._is_bad_asset({"id": "fresh"}) is True
+    assert manager._is_bad_asset({"id": "expired"}) is False
+    assert manager._is_bad_asset({"id": "unknown"}) is False
+
+
+async def test_manager_bad_assets_persisted_with_shown_history(
+    mock_hub: AsyncMock,
+) -> None:
+    """Bad assets live under a reserved key of the shown-history store."""
+    import time as time_mod
+
+    from custom_components.immich_slideshow.const import (
+        BAD_ASSET_TTL_HOURS,
+        BAD_ASSETS_STORE_KEY,
+    )
+
+    now = time_mod.time()
+    store = MagicMock()
+    store.async_load = AsyncMock(
+        return_value={
+            "shown-1": now - 60,
+            BAD_ASSETS_STORE_KEY: {
+                "bad-1": now - 60,
+                "bad-old": now - (BAD_ASSET_TTL_HOURS + 1) * 3600,
+            },
+        }
+    )
+    manager = SlideshowManager(hub=mock_hub, dual_portrait=False, shown_store=store)
+
+    await manager.async_load_shown()
+
+    assert set(manager._shown) == {"shown-1"}
+    assert set(manager._bad_assets) == {"bad-1"}
+
+    manager._mark_bad(create_landscape_asset("bad-2"), "cannot decode image")
+    store.async_delay_save.assert_called()
+    saved = manager._shown_data_to_save()
+    assert saved["shown-1"] == pytest.approx(now - 60)
+    assert set(saved[BAD_ASSETS_STORE_KEY]) == {"bad-1", "bad-2"}
+
+
+async def test_manager_loads_legacy_flat_shown_store(mock_hub: AsyncMock) -> None:
+    """A store written before bad-asset tracking (flat map) still loads."""
+    import time as time_mod
+
+    now = time_mod.time()
+    store = MagicMock()
+    store.async_load = AsyncMock(return_value={"a": now - 10, "b": now - 20})
+    manager = SlideshowManager(hub=mock_hub, dual_portrait=False, shown_store=store)
+
+    await manager.async_load_shown()
+
+    assert set(manager._shown) == {"a", "b"}
+    assert manager._bad_assets == {}
+    # No reserved key is written while the blacklist is empty
+    assert manager._shown_data_to_save() == manager._shown
+
+
+# =============================================================================
+# Anti-repetition window (shown history)
+# =============================================================================
+
+
+def _hours_ago(hours: float) -> float:
+    import time as time_mod
+
+    return time_mod.time() - hours * 3600
+
+
+def _boosted_asset(asset_id: str) -> dict[str, Any]:
+    """Asset uploaded 'now' → inside the very-recent boost window."""
+    from datetime import datetime, timezone
+
+    asset = create_landscape_asset(asset_id)
+    now = datetime.now(timezone.utc).isoformat()
+    asset["createdAt"] = now
+    asset["exifInfo"]["dateTimeOriginal"] = now
+    asset["localDateTime"] = now
+    return asset
+
+
+def test_recently_shown_uses_24h_window_for_regular_assets(
+    manager: SlideshowManager,
+) -> None:
+    """A regular (old) asset is excluded for SHOWN_MEMORY_HOURS, then eligible."""
+    from custom_components.immich_slideshow.const import SHOWN_MEMORY_HOURS
+
+    manager._shown = {
+        "inside": _hours_ago(SHOWN_MEMORY_HOURS - 1),
+        "outside": _hours_ago(SHOWN_MEMORY_HOURS + 1),
+    }
+    assert manager._is_recently_shown(create_landscape_asset("inside")) is True
+    assert manager._is_recently_shown(create_landscape_asset("outside")) is False
+    assert manager._is_recently_shown(create_landscape_asset("never")) is False
+
+
+def test_recently_shown_uses_short_window_for_boosted_assets(
+    mock_hub: AsyncMock,
+) -> None:
+    """Assets in the boost window cycle faster (SHOWN_MEMORY_HOURS_BOOSTED)."""
+    from custom_components.immich_slideshow.const import (
+        SHOWN_MEMORY_HOURS,
+        SHOWN_MEMORY_HOURS_BOOSTED,
+    )
+
+    manager = SlideshowManager(
+        hub=mock_hub, dual_portrait=False, recent_boost_days=7, recent_boost_share=40
+    )
+    # Midway between the two windows: excluded for a regular asset, free for a
+    # boosted one.
+    mid = (SHOWN_MEMORY_HOURS_BOOSTED + SHOWN_MEMORY_HOURS) / 2
+    manager._shown = {"fresh": _hours_ago(mid), "old": _hours_ago(mid)}
+
+    assert manager._is_recently_shown(_boosted_asset("fresh")) is False
+    assert manager._is_recently_shown(create_landscape_asset("old")) is True
+
+    # Inside the short window the boosted asset is excluded too.
+    manager._shown["fresh"] = _hours_ago(SHOWN_MEMORY_HOURS_BOOSTED / 2)
+    assert manager._is_recently_shown(_boosted_asset("fresh")) is True
+
+
+def test_boost_disabled_never_shortens_window(mock_hub: AsyncMock) -> None:
+    """recent_boost_days=0 (or share=0) → boosted window never applies."""
+    from custom_components.immich_slideshow.const import (
+        SHOWN_MEMORY_HOURS,
+        SHOWN_MEMORY_HOURS_BOOSTED,
+    )
+
+    mid = (SHOWN_MEMORY_HOURS_BOOSTED + SHOWN_MEMORY_HOURS) / 2
+    for kwargs in ({"recent_boost_days": 0}, {"recent_boost_share": 0}):
+        manager = SlideshowManager(hub=mock_hub, dual_portrait=False, **kwargs)
+        manager._shown = {"fresh": _hours_ago(mid)}
+        assert manager._is_in_boost_window(_boosted_asset("fresh")) is False
+        assert manager._is_recently_shown(_boosted_asset("fresh")) is True
+
+
+def test_pop_from_pool_skips_recently_shown(manager: SlideshowManager) -> None:
+    """Fresh assets are served first; recently shown ones stay in the pool."""
+    manager._shown = {"seen": _hours_ago(1)}
+    manager._asset_pool = [
+        create_landscape_asset("seen"),
+        create_landscape_asset("fresh"),
+    ]
+
+    result = manager._pop_from_pool(1)
+
+    assert [a["id"] for a in result] == ["fresh"]
+    assert [a["id"] for a in manager._asset_pool] == ["seen"]
+
+
+def test_pop_from_pool_anti_famine_uses_least_recently_shown(
+    manager: SlideshowManager,
+) -> None:
+    """When every asset was shown recently, serve the oldest-shown first."""
+    manager._shown = {
+        "newest": _hours_ago(1),
+        "oldest": _hours_ago(10),
+        "middle": _hours_ago(5),
+    }
+    manager._asset_pool = [
+        create_landscape_asset("newest"),
+        create_landscape_asset("oldest"),
+        create_landscape_asset("middle"),
+    ]
+
+    result = manager._pop_from_pool(2)
+
+    assert [a["id"] for a in result] == ["oldest", "middle"]
+    assert [a["id"] for a in manager._asset_pool] == ["newest"]
+
+
+async def test_refill_anti_famine_falls_back_when_all_recently_shown(
+    mock_hub: AsyncMock, manager: SlideshowManager
+) -> None:
+    """The refill must not starve the slideshow if every candidate was shown."""
+    manager._shown = {"a": _hours_ago(2), "b": _hours_ago(8)}
+    mock_hub.search_random_recent.return_value = [
+        create_landscape_asset("a"),
+        create_landscape_asset("b"),
+    ]
+
+    await manager._refill_pool()
+
+    assert {a["id"] for a in manager._asset_pool} == {"a", "b"}
+
+
+def test_mark_shown_records_all_assets_and_purges_expired(
+    manager: SlideshowManager,
+) -> None:
+    """Both assets of a dual-portrait pair are stamped; expired entries drop."""
+    from custom_components.immich_slideshow.const import SHOWN_MEMORY_HOURS
+
+    manager._shown = {"expired": _hours_ago(SHOWN_MEMORY_HOURS + 1)}
+
+    manager._mark_shown(create_landscape_asset("p1"), create_landscape_asset("p2"))
+
+    assert set(manager._shown) == {"p1", "p2"}
+
+
+def test_boost_reshow_hours_option_controls_window(mock_hub: AsyncMock) -> None:
+    """recent_boost_reshow_hours sets the boosted window (1 h vs 12 h)."""
+    for hours, shown_ago, expected in (
+        (1, 2, False),    # 1 h window, shown 2 h ago → free
+        (12, 2, True),    # 12 h window, shown 2 h ago → still excluded
+        (12, 13, False),  # past the 12 h window → free
+    ):
+        manager = SlideshowManager(
+            hub=mock_hub,
+            dual_portrait=False,
+            recent_boost_days=7,
+            recent_boost_share=40,
+            recent_boost_reshow_hours=hours,
+        )
+        manager._shown = {"x": _hours_ago(shown_ago)}
+        assert manager._is_recently_shown(_boosted_asset("x")) is expected
+
+
+def test_boost_reshow_hours_never_below_one(mock_hub: AsyncMock) -> None:
+    """A 0 / negative value is clamped to 1 h (no immediate repeats)."""
+    manager = SlideshowManager(
+        hub=mock_hub, dual_portrait=False, recent_boost_reshow_hours=0
+    )
+    assert manager._recent_boost_reshow_hours == 1

@@ -853,65 +853,6 @@ async def test_search_random_from_albums_server_error() -> None:
 
 
 # =============================================================================
-# Search Random In Any Album Tests
-# =============================================================================
-
-
-async def test_search_random_in_any_album_success() -> None:
-    """Test successful random search in any album."""
-    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
-
-    mock_assets = [
-        {"id": "asset-1", "type": "IMAGE"},
-        {"id": "asset-2", "type": "IMAGE"},
-    ]
-
-    with aioresponses() as mock:
-        mock.post(
-            f"{MOCK_HOST}/api/search/random",
-            payload=mock_assets,
-        )
-
-        result = await hub.search_random_in_any_album(count=10)
-        assert len(result) == 2
-        assert result[0]["id"] == "asset-1"
-
-    await hub.close()
-
-
-async def test_search_random_in_any_album_empty_results() -> None:
-    """Test random search in any album with no results."""
-    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
-
-    with aioresponses() as mock:
-        mock.post(
-            f"{MOCK_HOST}/api/search/random",
-            payload=[],
-        )
-
-        result = await hub.search_random_in_any_album(count=10)
-        assert result == []
-
-    await hub.close()
-
-
-async def test_search_random_in_any_album_server_error() -> None:
-    """Test random search in any album returns empty after retries on server error."""
-    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
-
-    with aioresponses() as mock:
-        # Mock 3 failures (MAX_RETRIES)
-        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
-        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
-        mock.post(f"{MOCK_HOST}/api/search/random", status=500)
-
-        result = await hub.search_random_in_any_album(count=10)
-        assert result == []
-
-    await hub.close()
-
-
-# =============================================================================
 # Search Random By Person Tests
 # =============================================================================
 
@@ -1080,5 +1021,502 @@ async def test_search_random_by_person_server_error() -> None:
 
         result = await hub.search_random_by_person(person_ids, count=10)
         assert result == []
+
+    await hub.close()
+
+
+# =============================================================================
+# Structured search API (Immich 3.2+) vs legacy flat API
+# =============================================================================
+
+
+def _mock_version(mock: aioresponses, major: int, minor: int, patch: int = 0) -> None:
+    mock.get(
+        f"{MOCK_HOST}/api/server/version",
+        payload={"major": major, "minor": minor, "patch": patch},
+    )
+
+
+def _post_bodies(mock: aioresponses) -> list[dict]:
+    return [
+        call.kwargs.get("json", {})
+        for (method, _), calls in mock.requests.items()
+        if method == "POST"
+        for call in calls
+    ]
+
+
+def _get_urls(mock: aioresponses) -> list[str]:
+    return [
+        str(url)
+        for (method, url), calls in mock.requests.items()
+        if method == "GET"
+        for _ in calls
+    ]
+
+
+LEGACY_ONLY_KEYS = {
+    "type", "takenAfter", "createdAfter", "isFavorite", "albumIds",
+    "personIds", "visibility", "isNotInAlbum",
+}
+
+
+async def test_detect_search_api_v2_cached() -> None:
+    """Immich >= 3.2.0 → structured API, detected once and cached."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    assert hub.supports_search_v2 is False
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        assert await hub.detect_search_api() is True
+        # Second call must not hit the server (version mocked only once)
+        assert await hub.detect_search_api() is True
+        assert hub.supports_search_v2 is True
+        assert len(_get_urls(mock)) == 1
+
+    await hub.close()
+
+
+async def test_detect_search_api_legacy_version() -> None:
+    """Immich 3.1.x → legacy flat API."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 1, 9)
+        assert await hub.detect_search_api() is False
+        assert hub.supports_search_v2 is False
+
+    await hub.close()
+
+
+async def test_detect_search_api_unknown_is_retried() -> None:
+    """Unknown version → legacy for now, detection retried next time."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(f"{MOCK_HOST}/api/server/version", status=500)
+        assert await hub.detect_search_api() is False
+        _mock_version(mock, 3, 2, 0)
+        assert await hub.detect_search_api() is True
+
+    await hub.close()
+
+
+async def test_search_random_recent_v2_body() -> None:
+    """Structured API: only `filter`, with exclusions as server-side `none`."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[{"id": "a"}])
+
+        result = await hub.search_random_recent(
+            days=30,
+            count=5,
+            favorites_filter="only",
+            exclude_album_ids=["album-b", "album-a"],
+            exclude_person_ids=["person-x"],
+        )
+        assert result == [{"id": "a"}]
+
+        [body] = _post_bodies(mock)
+        assert not LEGACY_ONLY_KEYS & body.keys()
+        assert body["size"] == 5
+        assert body["withExif"] is True
+        assert body["withPeople"] is True
+        f = body["filter"]
+        assert f["type"] == {"eq": "IMAGE"}
+        assert f["trashedAt"] == {"eq": None}
+        assert f["visibility"] == {"in": ["timeline"]}
+        assert f["originalFileName"] == {"notLike": ".\\_"}
+        assert f["takenAt"]["gte"].endswith("Z")
+        assert f["isFavorite"] == {"eq": True}
+        assert f["albumIds"] == {"none": ["album-a", "album-b"]}
+        assert f["personIds"] == {"none": ["person-x"]}
+
+    await hub.close()
+
+
+async def test_search_random_recent_v2_include_archived() -> None:
+    """Structured API: include_archived widens visibility to archive."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[])
+
+        await hub.search_random_recent(days=30, count=5, include_archived=True)
+        [body] = _post_bodies(mock)
+        assert body["filter"]["visibility"] == {"in": ["timeline", "archive"]}
+        assert "albumIds" not in body["filter"]
+        assert "personIds" not in body["filter"]
+        assert "isFavorite" not in body["filter"]
+
+    await hub.close()
+
+
+async def test_search_random_recent_legacy_body() -> None:
+    """Legacy flat API: flat fields, timeline only unless include_archived."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 1, 0)
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[], repeat=True)
+
+        await hub.search_random_recent(
+            days=30, count=5, favorites_filter="exclude",
+            exclude_album_ids=["album-a"], exclude_person_ids=["person-x"],
+        )
+        await hub.search_random_recent(days=30, count=5, include_archived=True)
+
+        default_body, archived_body = _post_bodies(mock)
+        assert "filter" not in default_body
+        assert default_body["type"] == "IMAGE"
+        assert default_body["takenAfter"].endswith("Z")
+        assert default_body["isFavorite"] is False
+        assert default_body["visibility"] == "timeline"
+        assert default_body["withExif"] is True
+        assert default_body["withPeople"] is True
+        # Exclusions can't be expressed on the flat API (caller filters)
+        assert "albumIds" not in default_body
+        assert "personIds" not in default_body
+        assert "visibility" not in archived_body
+
+    await hub.close()
+
+
+async def test_search_random_recent_boost_v2_single_or_request() -> None:
+    """Structured API: boost is ONE request with or [takenAt, createdAt]."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=[{"id": "a"}, {"id": "b"}],
+        )
+
+        result = await hub.search_random_recent_boost(days=7, count=10)
+        assert [a["id"] for a in result] == ["a", "b"]
+
+        [body] = _post_bodies(mock)
+        branches = body["filter"]["or"]
+        assert len(branches) == 2
+        taken, created = branches
+        assert set(taken) == {"takenAt"}
+        assert set(created) == {"createdAt"}
+        assert taken["takenAt"]["gte"] == created["createdAt"]["gte"]
+        assert "takenAt" not in body["filter"]
+
+    await hub.close()
+
+
+async def test_search_random_recent_boost_legacy_two_requests_dedup() -> None:
+    """Legacy flat API: boost = takenAfter + createdAfter merged, deduplicated."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 1, 0)
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[{"id": "a"}, {"id": "b"}])
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[{"id": "b"}, {"id": "c"}])
+
+        result = await hub.search_random_recent_boost(days=7, count=10)
+        assert sorted(a["id"] for a in result) == ["a", "b", "c"]
+
+        bodies = _post_bodies(mock)
+        assert len(bodies) == 2
+        assert {("takenAfter" in b, "createdAfter" in b) for b in bodies} == {
+            (True, False),
+            (False, True),
+        }
+
+    await hub.close()
+
+
+async def test_search_random_from_albums_v2_merges_any_and_none() -> None:
+    """Structured API: per-album `any` and excluded albums share one IdsFilter."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[{"id": "a"}])
+
+        result = await hub.search_random_from_albums(
+            ["album-1"], count=2, exclude_album_ids=["album-x"],
+            exclude_person_ids=["person-x"], include_archived=True,
+        )
+        assert result[0]["_album_id"] == "album-1"
+
+        [body] = _post_bodies(mock)
+        assert body["filter"]["albumIds"] == {"any": ["album-1"], "none": ["album-x"]}
+        assert body["filter"]["personIds"] == {"none": ["person-x"]}
+        assert body["filter"]["visibility"] == {"in": ["timeline", "archive"]}
+        assert not LEGACY_ONLY_KEYS & body.keys()
+
+    await hub.close()
+
+
+async def test_search_random_by_person_v2_body() -> None:
+    """Structured API: one `personIds any` call per person, defensive filter kept."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            payload=[
+                {"id": "a", "people": [{"id": "person-1"}]},
+                {"id": "b", "people": [{"id": "someone-else"}]},
+            ],
+        )
+
+        result = await hub.search_random_by_person(
+            ["person-1"], count=5, exclude_person_ids=["person-x"]
+        )
+        assert [a["id"] for a in result] == ["a"]
+
+        [body] = _post_bodies(mock)
+        assert body["filter"]["personIds"] == {"any": ["person-1"], "none": ["person-x"]}
+        assert body["withPeople"] is True
+
+    await hub.close()
+
+
+async def test_search_400_not_retried_and_warned_once(caplog) -> None:
+    """A 400 (e.g. deleted album id) returns [] at once and warns once per id set."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_version(mock, 3, 2, 0)
+        mock.post(
+            f"{MOCK_HOST}/api/search/random",
+            status=400,
+            payload={"message": "Not found or no album.read access"},
+            repeat=True,
+        )
+
+        assert await hub.search_random_from_albums(["gone-album"], count=2) == []
+        assert await hub.search_random_from_albums(["gone-album"], count=2) == []
+
+        assert len(_post_bodies(mock)) == 2  # one per call, no retries
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "gone-album" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+
+    await hub.close()
+
+
+async def test_download_asset_not_found_not_retried() -> None:
+    """A 404 (original missing on disk) is not retried."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(f"{MOCK_HOST}/api/assets/gone/original", status=404, repeat=True)
+        assert await hub.download_asset("gone") is None
+        assert len(_get_urls(mock)) == 1
+
+    await hub.close()
+
+
+async def test_download_image_fullsize() -> None:
+    """download_image fetches the fullsize rendition."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/assets/a1/thumbnail?size=fullsize",
+            body=b"jpeg",
+            headers={"content-type": "image/jpeg"},
+        )
+        assert await hub.download_image("a1") == b"jpeg"
+
+    await hub.close()
+
+
+async def test_download_image_preview_size() -> None:
+    """download_image can request the preview rendition."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/assets/a1/thumbnail?size=preview",
+            body=b"small",
+            headers={"content-type": "image/jpeg"},
+        )
+        assert await hub.download_image("a1", size="preview") == b"small"
+
+    await hub.close()
+
+
+async def test_download_image_403_falls_back_to_original_for_good(caplog) -> None:
+    """Missing asset.view → original, remembered for later calls, logged once."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/assets/a1/thumbnail?size=fullsize",
+            status=403,
+            payload={"message": "Missing required permission: asset.view"},
+        )
+        for asset_id in ("a1", "a2"):
+            mock.get(
+                f"{MOCK_HOST}/api/assets/{asset_id}/original",
+                body=b"orig-" + asset_id.encode(),
+                headers={"content-type": "image/jpeg"},
+            )
+
+        assert await hub.download_image("a1") == b"orig-a1"
+        assert await hub.download_image("a2") == b"orig-a2"
+
+        urls = _get_urls(mock)
+        assert sum("/thumbnail" in u for u in urls) == 1
+        assert sum("/original" in u for u in urls) == 2
+        infos = [r for r in caplog.records if "asset.view" in r.getMessage()]
+        assert len(infos) == 1
+
+    await hub.close()
+
+
+async def test_download_image_404_no_retry_no_fallback() -> None:
+    """A 404 on the rendition returns None at once, without trying /original."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        mock.get(
+            f"{MOCK_HOST}/api/assets/gone/thumbnail?size=fullsize",
+            status=404,
+            repeat=True,
+        )
+        assert await hub.download_image("gone") is None
+        urls = _get_urls(mock)
+        assert len(urls) == 1
+        assert "/original" not in urls[0]
+
+    await hub.close()
+
+
+# =============================================================================
+# Permission probing — asset.view (recommended)
+# =============================================================================
+
+
+def _mock_permission_probes(mock, *, view_status: int) -> None:
+    """Mock every endpoint check_permissions touches; only asset.view varies."""
+    for _ in range(2):  # the asset.read probe, then the id lookup
+        mock.post(f"{MOCK_HOST}/api/search/random", payload=[{"id": "a1"}])
+    mock.get(
+        f"{MOCK_HOST}/api/assets/a1/original",
+        status=206,
+        body=b"x",
+        headers={"content-type": "image/jpeg"},
+    )
+    if view_status == 403:
+        mock.get(
+            f"{MOCK_HOST}/api/assets/a1/thumbnail?size=thumbnail",
+            status=403,
+            payload={"message": "Missing required permission: asset.view"},
+        )
+    else:
+        mock.get(
+            f"{MOCK_HOST}/api/assets/a1/thumbnail?size=thumbnail",
+            status=view_status,
+            body=b"x",
+            headers={"content-type": "image/webp"},
+        )
+    for path in ("/api/memories", "/api/albums", "/api/people", "/api/users"):
+        mock.get(f"{MOCK_HOST}{path}", payload=[])
+
+
+@pytest.mark.parametrize(("view_status", "expected_ok"), [(200, True), (403, False)])
+async def test_check_permissions_probes_asset_view(view_status, expected_ok) -> None:
+    """asset.view is probed on the thumbnail endpoint of a real asset."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        _mock_permission_probes(mock, view_status=view_status)
+        perms = await hub.check_permissions()
+
+    assert perms["asset_view"] == {
+        "ok": expected_ok,
+        "permission": "asset.view",
+        "unknown": False,
+    }
+    assert perms["asset_download"]["ok"] is True
+    await hub.close()
+
+
+async def test_check_permissions_asset_view_unknown_without_asset() -> None:
+    """No asset to probe with → asset.view is unknown, never falsely denied."""
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+
+    with aioresponses() as mock:
+        for _ in range(2):
+            mock.post(f"{MOCK_HOST}/api/search/random", payload=[])
+        for path in ("/api/memories", "/api/albums", "/api/people", "/api/users"):
+            mock.get(f"{MOCK_HOST}{path}", payload=[])
+        perms = await hub.check_permissions()
+
+    assert perms["asset_view"]["unknown"] is True
+    assert perms["asset_download"]["unknown"] is True
+    await hub.close()
+
+
+async def test_get_memories_sends_plain_date_first() -> None:
+    """Immich 3.1+ wants YYYY-MM-DD: the first request must use that form."""
+    import re
+
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    with aioresponses() as mock:
+        mock.get(
+            re.compile(rf"{re.escape(MOCK_HOST)}/api/memories\?.*"), payload=[]
+        )
+        await hub.get_memories("2026-10-12")
+
+        urls = [str(key[1]) for key in mock.requests]
+        assert len(urls) == 1
+        assert "for=2026-10-12" in urls[0]
+        assert "T00%3A00" not in urls[0] and "T00:00" not in urls[0]
+
+    await hub.close()
+
+
+async def test_get_memories_plain_date_even_from_datetime_input() -> None:
+    """A full datetime passed in is truncated to the plain date."""
+    import re
+
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    with aioresponses() as mock:
+        mock.get(
+            re.compile(rf"{re.escape(MOCK_HOST)}/api/memories\?.*"), payload=[]
+        )
+        await hub.get_memories("2026-10-12T09:30:00.000Z")
+
+        urls = [str(key[1]) for key in mock.requests]
+        assert "for=2026-10-12" in urls[0]
+        assert "09" not in urls[0].split("for=")[1].split("&")[0]
+
+    await hub.close()
+
+
+async def test_get_memories_falls_back_to_legacy_datetime_on_400() -> None:
+    """Older v3 builds reject the plain date: retry at once with UTC datetime."""
+    import re
+
+    hub = ImmichHub(MOCK_HOST, MOCK_API_KEY)
+    memories = [{"data": {"year": 2020}, "assets": [{"id": "m1", "type": "IMAGE"}]}]
+    pattern = re.compile(rf"{re.escape(MOCK_HOST)}/api/memories\?.*")
+    with aioresponses() as mock:
+        mock.get(pattern, status=400, payload={"message": "Validation failed"})
+        mock.get(pattern, payload=memories)
+
+        result = await hub.get_memories("2026-10-12")
+
+        urls = [str(key[1]) for key in mock.requests]
+        assert len(urls) == 2
+        assert "for=2026-10-12" in urls[0] and "T00" not in urls[0]
+        assert "2026-10-12T00" in urls[1]
+        assert result == memories
 
     await hub.close()

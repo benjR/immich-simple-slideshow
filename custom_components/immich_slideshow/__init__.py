@@ -11,6 +11,7 @@ from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
+    RECOMMENDED_CAPABILITIES,
     required_capabilities,
     MIN_IMMICH_VERSION,
     format_version,
@@ -147,6 +148,11 @@ def _permissions_issue_id(entry: ConfigEntry) -> str:
     return f"missing_permissions_{entry.entry_id}"
 
 
+def _recommended_permissions_issue_id(entry: ConfigEntry) -> str:
+    """Stable repair-issue id for this entry's missing-recommended-permissions warning."""
+    return f"missing_recommended_permissions_{entry.entry_id}"
+
+
 def _version_issue_id(entry: ConfigEntry) -> str:
     """Stable repair-issue id for this entry's unsupported-version warning."""
     return f"immich_version_{entry.entry_id}"
@@ -230,6 +236,37 @@ async def _async_update_permissions_issue(
         )
     else:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+    # Recommended permissions: the slideshow works without them but degrades,
+    # so they get their own, softer issue rather than the "sources broken" one.
+    recommended_issue_id = _recommended_permissions_issue_id(entry)
+    missing_recommended = sorted(
+        {
+            perms[cap]["permission"]
+            for cap in RECOMMENDED_CAPABILITIES
+            if cap in perms and not perms[cap]["ok"] and not perms[cap]["unknown"]
+        }
+    )
+    if missing_recommended:
+        _LOGGER.warning(
+            "Immich API key is missing recommended permission(s) %s — photos in "
+            "formats Home Assistant can't decode (e.g. HEIC) will be skipped",
+            ", ".join(missing_recommended),
+        )
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            recommended_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="missing_recommended_permissions",
+            translation_placeholders={
+                "missing": ", ".join(missing_recommended),
+                "url": f"{entry.data[CONF_HOST]}/user-settings?isOpen=api-keys",
+            },
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, recommended_issue_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

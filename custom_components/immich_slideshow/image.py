@@ -10,19 +10,32 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from homeassistant.components.image import ImageEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 
 # Pool management constants
 MAX_POOL_SIZE = 200  # Maximum assets to keep in pool
 REFILL_THRESHOLD = 20  # Refill when pool drops below this
 POOL_FETCH_SIZE = 100  # Number of assets to fetch per refill
 API_CONCURRENCY_LIMIT = 5  # Max concurrent API calls for asset enrichment
+# A failed download may be transient (Immich restarting, network blip), unlike
+# a decode failure: only blacklist an asset after this many download failures.
+DOWNLOAD_FAILURES_BEFORE_BAD = 2
+
+# Errors Pillow raises on bytes it cannot turn into an image
+IMAGE_DECODE_ERRORS = (
+    UnidentifiedImageError,
+    Image.DecompressionBombError,
+    OSError,
+    ValueError,
+    SyntaxError,
+)
 
 from .const import (
     # Core config keys
@@ -39,6 +52,9 @@ from .const import (
     # Recent source keys
     CONF_RECENT_DAYS,
     CONF_RECENT_FAVORITES_FILTER,
+    CONF_RECENT_BOOST_DAYS,
+    CONF_RECENT_BOOST_SHARE,
+    CONF_RECENT_BOOST_RESHOW_HOURS,
     # Memories source keys
     CONF_MEMORIES_MAX_YEARS,
     # Albums/Persons source keys
@@ -47,6 +63,7 @@ from .const import (
     # Global exclusions
     CONF_EXCLUDE_ALBUMS,
     CONF_EXCLUDE_PERSONS,
+    CONF_INCLUDE_ARCHIVED,
     # Defaults
     DEFAULT_BACKGROUND_PATH,
     DEFAULT_DUAL_PORTRAIT,
@@ -59,8 +76,21 @@ from .const import (
     DEFAULT_SOURCE_PERSONS_WEIGHT,
     DEFAULT_RECENT_DAYS,
     DEFAULT_RECENT_FAVORITES_FILTER,
+    DEFAULT_RECENT_BOOST_DAYS,
+    DEFAULT_RECENT_BOOST_SHARE,
+    DEFAULT_RECENT_BOOST_RESHOW_HOURS,
     DEFAULT_MEMORIES_MAX_YEARS,
+    DEFAULT_INCLUDE_ARCHIVED,
     DOMAIN,
+    # Anti-repetition ("recently shown") settings
+    SHOWN_MEMORY_HOURS,
+    SHOWN_SAVE_DELAY_SECONDS,
+    SHOWN_STORAGE_KEY,
+    SHOWN_STORAGE_VERSION,
+    # Undisplayable assets
+    BAD_ASSET_TTL_HOURS,
+    BAD_ASSETS_STORE_KEY,
+    MAX_DISPLAY_ATTEMPTS,
     parse_resolutions,
 )
 from .hub import ImmichHub
@@ -83,6 +113,9 @@ class SlideshowManager:
         # Recent source config
         recent_days: int = 90,
         recent_favorites_filter: str = "all",
+        recent_boost_days: int = 7,
+        recent_boost_share: int = 40,
+        recent_boost_reshow_hours: int = DEFAULT_RECENT_BOOST_RESHOW_HOURS,
         # Memories source config
         memories_max_years: int = 0,
         # Albums/Persons includes
@@ -91,6 +124,9 @@ class SlideshowManager:
         # Global exclusions
         exclude_albums: list[str] | None = None,
         exclude_persons: list[str] | None = None,
+        include_archived: bool = False,
+        # Anti-repetition persistent store
+        shown_store: Store | None = None,
     ) -> None:
         """Initialize the manager.
 
@@ -103,11 +139,19 @@ class SlideshowManager:
             source_persons_weight: Weight for persons source (0-100)
             recent_days: Days to look back for recent photos (0 = unlimited)
             recent_favorites_filter: "all", "only", or "exclude"
+            recent_boost_days: Window (days) for the very-recent boost within
+                the recent source (0 = boost disabled)
+            recent_boost_reshow_hours: Hours before a boosted photo can be
+                shown again (regular photos use SHOWN_MEMORY_HOURS)
+            recent_boost_share: Percentage of recent-source draws reserved
+                for the boost window (0-100)
             memories_max_years: Max years for memories (0 = unlimited)
             albums_include: List of album UUIDs to include
             persons_include: List of person UUIDs to include
             exclude_albums: List of album UUIDs to globally exclude
             exclude_persons: List of person UUIDs to globally exclude
+            include_archived: Also draw photos archived in Immich
+            shown_store: Store persisting the "recently shown" history
         """
         self._hub = hub
         self._host = hub._host  # Store for building Immich URLs
@@ -124,6 +168,9 @@ class SlideshowManager:
         # Recent source config
         self._recent_days = recent_days
         self._recent_favorites_filter = recent_favorites_filter
+        self._recent_boost_days = recent_boost_days
+        self._recent_boost_share = recent_boost_share
+        self._recent_boost_reshow_hours = max(1, int(recent_boost_reshow_hours))
 
         # Memories source config
         self._memories_max_years = memories_max_years
@@ -135,6 +182,11 @@ class SlideshowManager:
         # Global exclusions (as sets for O(1) lookup)
         self._exclude_albums = set(exclude_albums or [])
         self._exclude_persons = set(exclude_persons or [])
+        self._include_archived = include_archived
+        # Stale album ids (deleted albums) are dropped once the album list is
+        # known: Immich's v3.2 search answers 400 to an unknown album id.
+        self._albums_include_configured = bool(self._albums_include)
+        self._album_ids_sanitized = False
 
         self._asset_pool: list[dict] = []
         # Current source images (PIL Image objects, already EXIF-transposed)
@@ -157,6 +209,18 @@ class SlideshowManager:
         self._refresh_lock = asyncio.Lock()
         # Track if pool is empty (for entity availability)
         self._pool_empty = False
+
+        # Anti-repetition: asset_id -> unix timestamp of last display.
+        # Persisted via Store so the exclusion window survives HA restarts.
+        self._shown_store = shown_store
+        self._shown: dict[str, float] = {}
+        self._shown_last_save: float = 0.0
+
+        # Undisplayable assets: asset_id -> unix timestamp when marked bad.
+        # Persisted in the same Store (reserved key), expires after
+        # BAD_ASSET_TTL_HOURS. Download failures are counted in memory first.
+        self._bad_assets: dict[str, float] = {}
+        self._download_failures: dict[str, int] = {}
 
         # Mappings populated once at first refill (requires user.read / album.read).
         # If perms missing → empty dict, integration must be reloaded after granting them.
@@ -188,6 +252,38 @@ class SlideshowManager:
         self._albums_fetched = True
         if albums:
             self._album_names = {a["id"]: a.get("albumName", "") for a in albums if a.get("id")}
+
+    def _sanitize_album_ids(self) -> None:
+        """Drop configured album ids that no longer exist (once, when known).
+
+        A deleted album left in `albums_include` or `exclude_albums` would make
+        every Immich v3.2 search request carrying it fail with HTTP 400. Only
+        runs once the album list could be fetched; without `album.read` the ids
+        are kept as-is.
+        """
+        if self._album_ids_sanitized or not self._album_names:
+            return
+        self._album_ids_sanitized = True
+        known = set(self._album_names)
+        stale = (set(self._albums_include) | self._exclude_albums) - known
+        if not stale:
+            return
+        _LOGGER.warning(
+            "Ignoring %d album id(s) that no longer exist in Immich "
+            "(remove them from the integration options): %s",
+            len(stale),
+            ", ".join(sorted(stale)),
+        )
+        self._albums_include = [a for a in self._albums_include if a in known]
+        self._exclude_albums &= known
+
+    def _search_kwargs(self) -> dict[str, Any]:
+        """Filters shared by every search call (server-side on Immich >= 3.2)."""
+        return {
+            "include_archived": self._include_archived,
+            "exclude_album_ids": sorted(self._exclude_albums),
+            "exclude_person_ids": sorted(self._exclude_persons),
+        }
 
     @property
     def memory_year(self) -> int | None:
@@ -383,10 +479,156 @@ class SlideshowManager:
         """Return True if images are available."""
         return not self._pool_empty
 
+    async def async_load_shown(self) -> None:
+        """Load the persisted recently-shown history (call once at setup)."""
+        if self._shown_store is None:
+            return
+        try:
+            data = await self._shown_store.async_load()
+        except Exception as err:  # Corrupt store must never block the slideshow
+            _LOGGER.warning("Could not load shown-history store: %s", err)
+            return
+        if isinstance(data, dict):
+            now = time.time()
+            cutoff = now - SHOWN_MEMORY_HOURS * 3600
+            # Flat {asset_id: ts} map; the bad-asset map lives under a reserved
+            # key whose (dict) value the float filter skips.
+            self._shown = {
+                asset_id: float(ts)
+                for asset_id, ts in data.items()
+                if isinstance(ts, (int, float)) and float(ts) >= cutoff
+            }
+            bad = data.get(BAD_ASSETS_STORE_KEY)
+            if isinstance(bad, dict):
+                bad_cutoff = now - BAD_ASSET_TTL_HOURS * 3600
+                self._bad_assets = {
+                    asset_id: float(ts)
+                    for asset_id, ts in bad.items()
+                    if isinstance(ts, (int, float)) and float(ts) >= bad_cutoff
+                }
+        _LOGGER.debug(
+            "Loaded %d recently-shown and %d bad asset ids",
+            len(self._shown),
+            len(self._bad_assets),
+        )
+
+    def _shown_data_to_save(self) -> dict[str, Any]:
+        """Return the serializable shown-history (Store data callback)."""
+        data: dict[str, Any] = dict(self._shown)
+        if self._bad_assets:
+            data[BAD_ASSETS_STORE_KEY] = dict(self._bad_assets)
+        return data
+
+    def _purge_shown(self) -> None:
+        """Drop history entries older than the exclusion window."""
+        cutoff = time.time() - SHOWN_MEMORY_HOURS * 3600
+        self._shown = {k: v for k, v in self._shown.items() if v >= cutoff}
+
+    def _is_in_boost_window(self, asset: dict | None) -> bool:
+        """Return True if the asset was taken OR uploaded < recent_boost_days ago.
+
+        Checked against the EXIF capture date (dateTimeOriginal /
+        localDateTime / fileCreatedAt) and the upload date (createdAt), so an
+        old scan imported yesterday counts as boosted too. Always False when
+        the boost is disabled (days or share at 0).
+        """
+        if (
+            not asset
+            or self._recent_boost_days <= 0
+            or self._recent_boost_share <= 0
+        ):
+            return False
+        cutoff = time.time() - self._recent_boost_days * 86400
+        exif = asset.get("exifInfo") or {}
+        for value in (
+            exif.get("dateTimeOriginal"),
+            asset.get("localDateTime"),
+            asset.get("fileCreatedAt"),
+            asset.get("createdAt"),
+        ):
+            if not value or not isinstance(value, str):
+                continue
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.astimezone()
+            if dt.timestamp() >= cutoff:
+                return True
+        return False
+
+    def _is_recently_shown(self, asset: dict | None) -> bool:
+        """Return True if this asset was displayed within its exclusion window.
+
+        Assets inside the recent-boost window use the shorter, configurable
+        recent_boost_reshow_hours window (they may cycle several times a
+        day); everything else uses SHOWN_MEMORY_HOURS.
+        """
+        if not asset:
+            return False
+        ts = self._shown.get(asset.get("id") or "")
+        if ts is None:
+            return False
+        window_hours = (
+            self._recent_boost_reshow_hours
+            if self._is_in_boost_window(asset)
+            else SHOWN_MEMORY_HOURS
+        )
+        return (time.time() - ts) < window_hours * 3600
+
+    def _is_bad_asset(self, asset: dict | None) -> bool:
+        """Return True if this asset failed to download/decode recently."""
+        if not asset:
+            return False
+        ts = self._bad_assets.get(asset.get("id") or "")
+        return ts is not None and (time.time() - ts) < BAD_ASSET_TTL_HOURS * 3600
+
+    def _mark_bad(self, asset: dict, reason: str) -> None:
+        """Remember an undisplayable asset so it is not drawn again for a while."""
+        now = time.time()
+        cutoff = now - BAD_ASSET_TTL_HOURS * 3600
+        self._bad_assets = {k: v for k, v in self._bad_assets.items() if v >= cutoff}
+        self._bad_assets[asset["id"]] = now
+        self._download_failures.pop(asset["id"], None)
+        _LOGGER.warning(
+            "Skipping asset %s (%s) for %dh: %s",
+            asset["id"],
+            asset.get("originalFileName") or "unknown file",
+            BAD_ASSET_TTL_HOURS,
+            reason,
+        )
+        if self._shown_store is not None:
+            self._shown_store.async_delay_save(self._shown_data_to_save, 5)
+
+    def _mark_shown(self, *assets: dict | None) -> None:
+        """Record assets as displayed now; schedule a rate-limited save."""
+        now = time.time()
+        marked = False
+        for asset in assets:
+            if asset and asset.get("id"):
+                self._shown[asset["id"]] = now
+                marked = True
+        if not marked:
+            return
+        self._purge_shown()
+        if (
+            self._shown_store is not None
+            and now - self._shown_last_save >= SHOWN_SAVE_DELAY_SECONDS
+        ):
+            self._shown_last_save = now
+            # Small delay batches the write off the refresh path; the actual
+            # rate limiting is the SHOWN_SAVE_DELAY_SECONDS gate above.
+            self._shown_store.async_delay_save(self._shown_data_to_save, 5)
+
     async def refresh(self) -> bool:
         """Load new source images. Returns True if successful."""
         async with self._refresh_lock:
-            return await self._do_refresh()
+            success = await self._do_refresh()
+            if success:
+                # Mark what is now on screen (both assets when dual portrait)
+                self._mark_shown(self._current_asset1, self._current_asset2)
+            return success
 
     def _close_images(self, img1: Image.Image | None, img2: Image.Image | None) -> None:
         """Close PIL images to free memory."""
@@ -423,6 +665,12 @@ class SlideshowManager:
 
         # Clear pool
         self._asset_pool.clear()
+
+        # Flush any unsaved shown-history (e.g. integration reload before the
+        # delayed save fired)
+        if self._shown_store is not None and (self._shown or self._bad_assets):
+            self._shown_store.async_delay_save(self._shown_data_to_save, 1)
+
         _LOGGER.debug("SlideshowManager cleanup complete")
 
     async def _do_refresh(self) -> bool:
@@ -496,65 +744,21 @@ class SlideshowManager:
                 _LOGGER.debug("Prefetch: pool empty, skipping")
                 return
 
-            # Pop one image from the pool
-            popped = self._pop_from_pool(count=1)
-            if not popped:
+            loaded = await self._load_next_display()
+            if loaded is None:
+                _LOGGER.debug("Prefetch: no displayable asset this cycle")
                 return
 
-            chosen = popped[0]
-            chosen_is_portrait = is_portrait(chosen)
-            _LOGGER.debug("Prefetching photo from source: %s", chosen.get("_source", "unknown"))
-
-            # If portrait + dual_portrait enabled → try to get another portrait
-            if self._dual_portrait and chosen_is_portrait:
-                second_list = self._pop_from_pool(count=1, portrait_only=True)
-                if second_list:
-                    second = second_list[0]
-                    img1_bytes = await self._hub.download_asset(chosen["id"])
-                    img2_bytes = await self._hub.download_asset(second["id"])
-
-                    if img1_bytes and img2_bytes:
-                        try:
-                            img1 = Image.open(io.BytesIO(img1_bytes))
-                            img1 = ImageOps.exif_transpose(img1)
-                            if img1.mode not in ("RGB", "L"):
-                                img1 = img1.convert("RGB")
-
-                            img2 = Image.open(io.BytesIO(img2_bytes))
-                            img2 = ImageOps.exif_transpose(img2)
-                            if img2.mode not in ("RGB", "L"):
-                                img2 = img2.convert("RGB")
-
-                            self._next_img1 = img1
-                            self._next_img2 = img2
-                            self._next_asset1 = chosen
-                            self._next_asset2 = second
-                            self._next_is_dual = True
-                            _LOGGER.debug("Prefetch complete: dual portrait ready")
-                            return
-                        except Exception as err:
-                            _LOGGER.warning("Prefetch: failed to load dual portrait: %s", err)
-
-            # Single image (landscape, or portrait without pair available)
-            image_bytes = await self._hub.download_asset(chosen["id"])
-            if not image_bytes:
-                _LOGGER.warning("Prefetch: failed to download asset %s", chosen["id"])
-                return
-
-            try:
-                img = Image.open(io.BytesIO(image_bytes))
-                img = ImageOps.exif_transpose(img)
-                if img.mode not in ("RGB", "L"):
-                    img = img.convert("RGB")
-
-                self._next_img1 = img
-                self._next_img2 = None
-                self._next_asset1 = chosen
-                self._next_asset2 = None
-                self._next_is_dual = False
-                _LOGGER.debug("Prefetch complete: single image ready")
-            except Exception as err:
-                _LOGGER.warning("Prefetch: failed to open image: %s", err)
+            img1, img2, asset1, asset2 = loaded
+            self._next_img1 = img1
+            self._next_img2 = img2
+            self._next_asset1 = asset1
+            self._next_asset2 = asset2
+            self._next_is_dual = img2 is not None
+            _LOGGER.debug(
+                "Prefetch complete: %s ready",
+                "dual portrait" if img2 is not None else "single image",
+            )
 
         except asyncio.CancelledError:
             _LOGGER.debug("Prefetch task cancelled")
@@ -587,65 +791,105 @@ class SlideshowManager:
 
         self._pool_empty = False
 
-        # Pop one image from the pool
-        popped = self._pop_from_pool(count=1)
-        if not popped:
+        loaded = await self._load_next_display()
+        if loaded is None:
+            _LOGGER.warning("No displayable asset found this cycle")
             return False
 
-        chosen = popped[0]
-        chosen_is_portrait = is_portrait(chosen)
-        _LOGGER.debug("Selected photo from source: %s", chosen.get("_source", "unknown"))
+        img1, img2, asset1, asset2 = loaded
+        self._current_img1 = img1
+        self._current_img2 = img2
+        self._current_asset1 = asset1
+        self._current_asset2 = asset2
+        self._is_dual = img2 is not None
+        return True
 
-        # Store current asset info for metadata exposure
-        self._current_asset1 = chosen
-        self._current_asset2 = None
+    async def _load_next_display(
+        self,
+    ) -> tuple[Image.Image, Image.Image | None, dict, dict | None] | None:
+        """Pop and decode the next displayable asset(s) from the pool.
 
-        # If portrait + dual_portrait enabled → try to get another portrait
-        if self._dual_portrait and chosen_is_portrait:
-            second_list = self._pop_from_pool(count=1, portrait_only=True)
-            if second_list:
-                second = second_list[0]
-                img1_bytes = await self._hub.download_asset(chosen["id"])
-                img2_bytes = await self._hub.download_asset(second["id"])
+        Returns (img1, img2, asset1, asset2) — img2/asset2 are None unless a
+        dual portrait could be composed. An asset that cannot be downloaded or
+        decoded is skipped (and remembered as bad) and the next pool asset is
+        tried, up to MAX_DISPLAY_ATTEMPTS per image, so a broken file costs no
+        display slot. For a dual portrait, only the failing asset is dropped:
+        the first portrait is kept and another partner is tried, falling back
+        to a single image.
+        """
+        for _ in range(MAX_DISPLAY_ATTEMPTS):
+            popped = self._pop_from_pool(count=1)
+            if not popped:
+                return None
+            chosen = popped[0]
+            _LOGGER.debug("Selected photo from source: %s", chosen.get("_source", "unknown"))
 
-                if img1_bytes and img2_bytes:
-                    try:
-                        img1 = Image.open(io.BytesIO(img1_bytes))
-                        img1 = ImageOps.exif_transpose(img1)
-                        if img1.mode not in ("RGB", "L"):
-                            img1 = img1.convert("RGB")
+            img1 = await self._load_asset_image(chosen)
+            if img1 is None:
+                continue
 
-                        img2 = Image.open(io.BytesIO(img2_bytes))
-                        img2 = ImageOps.exif_transpose(img2)
-                        if img2.mode not in ("RGB", "L"):
-                            img2 = img2.convert("RGB")
+            # If portrait + dual_portrait enabled → try to get another portrait
+            if self._dual_portrait and is_portrait(chosen):
+                for _ in range(MAX_DISPLAY_ATTEMPTS):
+                    second_list = self._pop_from_pool(count=1, portrait_only=True)
+                    if not second_list:
+                        break
+                    second = second_list[0]
+                    img2 = await self._load_asset_image(second)
+                    if img2 is not None:
+                        return img1, img2, chosen, second
 
-                        self._current_img1 = img1
-                        self._current_img2 = img2
-                        self._current_asset2 = second  # Store second asset for metadata
-                        self._is_dual = True
-                        return True
-                    except Exception as err:
-                        _LOGGER.warning("Failed to load dual portrait: %s", err)
+            # Single image (landscape, or portrait without pair available)
+            return img1, None, chosen, None
+        return None
 
-        # Single image (landscape, or portrait without pair available)
-        image_bytes = await self._hub.download_asset(chosen["id"])
+    async def _load_asset_image(self, asset: dict) -> Image.Image | None:
+        """Download and decode one asset. Returns None (and records it) on failure."""
+        asset_id = asset["id"]
+        image_bytes = await self._hub.download_image(asset_id)
         if not image_bytes:
-            _LOGGER.warning("Failed to download asset %s", chosen["id"])
-            return False
+            failures = self._download_failures.get(asset_id, 0) + 1
+            if failures >= DOWNLOAD_FAILURES_BEFORE_BAD:
+                self._mark_bad(asset, f"download failed {failures} times")
+            else:
+                # Bound the in-memory counter (e.g. during an Immich outage)
+                if len(self._download_failures) > 1000:
+                    self._download_failures.clear()
+                self._download_failures[asset_id] = failures
+                _LOGGER.debug(
+                    "Download failed for asset %s (%s), will retry it later",
+                    asset_id,
+                    asset.get("originalFileName") or "unknown file",
+                )
+            return None
 
+        self._download_failures.pop(asset_id, None)
+        # Full decode of a multi-megapixel original takes hundreds of ms: keep
+        # it off the event loop.
+        loop = asyncio.get_running_loop()
         try:
-            img = Image.open(io.BytesIO(image_bytes))
-            img = ImageOps.exif_transpose(img)
-            if img.mode not in ("RGB", "L"):
-                img = img.convert("RGB")
-            self._current_img1 = img
-            self._current_img2 = None
-            self._is_dual = False
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to open image: %s", err)
-            return False
+            return await loop.run_in_executor(None, decode_image, image_bytes)
+        except IMAGE_DECODE_ERRORS as err:
+            first_error = err
+
+        # Immich serves web-compatible *names* as-is, so a HEIC saved as .jpg
+        # or an oversized panorama comes back undecodable: retry once with the
+        # server-generated (downscaled) preview JPEG before giving up.
+        preview_bytes = await self._hub.download_image(asset_id, size="preview")
+        if preview_bytes:
+            try:
+                img = await loop.run_in_executor(None, decode_image, preview_bytes)
+                _LOGGER.debug(
+                    "Asset %s (%s) displayed from its preview rendition: %s",
+                    asset_id,
+                    asset.get("originalFileName") or "unknown file",
+                    first_error,
+                )
+                return img
+            except IMAGE_DECODE_ERRORS:
+                pass
+        self._mark_bad(asset, f"cannot decode image: {first_error}")
+        return None
 
     def _normalize_weights(self) -> dict[str, float]:
         """Normalize source weights to sum to 1.0.
@@ -702,14 +946,62 @@ class SlideshowManager:
         return counts
 
     async def _fetch_recent(self, count: int) -> list[dict]:
-        """Fetch recent photos."""
+        """Fetch recent photos, reserving a share for the very latest ones.
+
+        When the boost is enabled (recent_boost_days > 0 and
+        recent_boost_share > 0), ~recent_boost_share% of the requested assets
+        come from the boost window (taken OR uploaded < recent_boost_days),
+        the rest from the classic recent_days window. The classic query is
+        issued at full count so a sparse or empty boost window silently falls
+        back to classic recent photos — never a hole in the pool.
+        """
         # days=0 means unlimited (use ~100 years)
         days_param = self._recent_days if self._recent_days > 0 else 36500
-        assets = await self._hub.search_random_recent(
-            days=days_param,
-            count=count,
-            favorites_filter=self._recent_favorites_filter,
-        )
+
+        boost_count = 0
+        if self._recent_boost_days > 0 and self._recent_boost_share > 0:
+            boost_count = min(count, round(count * self._recent_boost_share / 100))
+
+        if boost_count <= 0:
+            assets = await self._hub.search_random_recent(
+                days=days_param,
+                count=count,
+                favorites_filter=self._recent_favorites_filter,
+                **self._search_kwargs(),
+            )
+        else:
+            boost_assets, classic_assets = await asyncio.gather(
+                self._hub.search_random_recent_boost(
+                    days=self._recent_boost_days,
+                    count=boost_count,
+                    favorites_filter=self._recent_favorites_filter,
+                    **self._search_kwargs(),
+                ),
+                self._hub.search_random_recent(
+                    days=days_param,
+                    count=count,
+                    favorites_filter=self._recent_favorites_filter,
+                    **self._search_kwargs(),
+                ),
+            )
+            # Boost assets first (guarantees their share), then classic as
+            # filler, deduplicated by id, truncated to the requested count.
+            assets = []
+            seen_ids: set[str] = set()
+            for asset in boost_assets + classic_assets:
+                asset_id = asset.get("id")
+                if asset_id and asset_id not in seen_ids:
+                    seen_ids.add(asset_id)
+                    assets.append(asset)
+                if len(assets) >= count:
+                    break
+            _LOGGER.debug(
+                "Recent source: %d boosted (<%s d) + %d classic of %d requested",
+                len(boost_assets),
+                self._recent_boost_days,
+                len(assets) - len(boost_assets),
+                count,
+            )
         # Tag source
         for asset in assets:
             asset["_source"] = "recent"
@@ -736,14 +1028,19 @@ class SlideshowManager:
         - If specific albums are selected (`albums_include` non-empty), the
           fan-out is restricted to those.
         - Otherwise ("any album" mode), the fan-out targets the user's full
-          album list cached in `_album_names`. We avoid Immich's
-          `isNotInAlbum: false` filter — it returns assets that aren't in any
-          album, which makes album attribution impossible.
+          album list cached in `_album_names`. One call per album keeps the
+          exposure balanced across albums (a single `albumIds: {any}` or
+          `hasAlbums` query would favour the biggest albums) and keeps the
+          `_album_id` attribution.
 
-        If `_album_names` isn't populated (e.g. perm missing), returns [].
+        If `_album_names` isn't populated (e.g. perm missing), returns []. If
+        specific albums were configured but none of them exists any more,
+        returns [] rather than silently widening to every album.
         """
         if self._albums_include:
             album_ids = self._albums_include
+        elif self._albums_include_configured:
+            return []
         else:
             album_ids = list(self._album_names.keys())
 
@@ -751,7 +1048,7 @@ class SlideshowManager:
             return []
 
         assets = await self._hub.search_random_from_albums(
-            album_ids=album_ids, count=count
+            album_ids=album_ids, count=count, **self._search_kwargs()
         )
         for asset in assets:
             asset["_source"] = "album"
@@ -765,6 +1062,7 @@ class SlideshowManager:
         assets = await self._hub.search_random_by_person(
             person_ids=self._persons_include,
             count=count,
+            **self._search_kwargs(),
         )
         # Tag source
         for asset in assets:
@@ -772,10 +1070,17 @@ class SlideshowManager:
         return assets
 
     def _apply_global_exclusions(self, assets: list[dict]) -> list[dict]:
-        """Filter out assets matching global exclusions.
+        """Filter out assets matching global exclusions (client-side net).
+
+        On Immich >= 3.2 the hub already excludes albums and persons
+        server-side (`none` filters), so this only catches what the server
+        could not: memory assets, and every source on legacy servers.
 
         Removes assets that:
-        - Are in excluded albums
+        - Were drawn from an excluded album (`_album_id`). Immich never returns
+          the albums an asset belongs to, so on legacy servers album exclusion
+          only covers album-sourced assets; recent/person/memory assets from an
+          excluded album can still show up there.
         - Contain excluded persons
         """
         if not self._exclude_albums and not self._exclude_persons:
@@ -787,10 +1092,6 @@ class SlideshowManager:
             if self._exclude_albums:
                 # Check _album_id (set by _fetch_albums)
                 if asset.get("_album_id") in self._exclude_albums:
-                    continue
-                # Also check albumIds if present in asset data
-                album_ids = set(asset.get("albumIds", []))
-                if album_ids & self._exclude_albums:
                     continue
 
             # Check person exclusion
@@ -811,6 +1112,7 @@ class SlideshowManager:
         # One-shot: fetch user mapping (ownerId → name) and album mapping (id → name)
         await self._ensure_user_names()
         await self._ensure_album_names()
+        self._sanitize_album_ids()
 
         # Calculate how many we need (up to POOL_FETCH_SIZE, capped by MAX_POOL_SIZE)
         current_size = len(self._asset_pool)
@@ -856,8 +1158,10 @@ class SlideshowManager:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Merge results with deduplication (same photo can appear in multiple sources)
-        # Also deduplicate against assets already in the pool to avoid repetition
+        # Also deduplicate against assets already in the pool, and exclude assets
+        # displayed less than SHOWN_MEMORY_HOURS ago (anti-repetition).
         all_assets: list[dict] = []
+        recently_shown: list[dict] = []
         seen_ids: set[str] = {a.get("id") for a in self._asset_pool if a.get("id")}
         for i, result in enumerate(results):
             if isinstance(result, Exception):
@@ -866,8 +1170,26 @@ class SlideshowManager:
                 for asset in result:
                     asset_id = asset.get("id")
                     if asset_id and asset_id not in seen_ids:
-                        all_assets.append(asset)
                         seen_ids.add(asset_id)
+                        if self._is_bad_asset(asset):
+                            continue
+                        if self._is_recently_shown(asset):
+                            recently_shown.append(asset)
+                        else:
+                            all_assets.append(asset)
+
+        # Anti-famine guard: if every candidate was shown recently (small
+        # library / narrow source buckets), fall back to the least recently
+        # shown assets instead of starving the slideshow.
+        if not all_assets and recently_shown:
+            recently_shown.sort(key=lambda a: self._shown.get(a.get("id"), 0.0))
+            all_assets = recently_shown
+            _LOGGER.info(
+                "Anti-repeat: all %d candidates were shown <%dh ago; "
+                "falling back to least recently shown",
+                len(all_assets),
+                SHOWN_MEMORY_HOURS,
+            )
 
         if not all_assets:
             _LOGGER.warning("No assets found from any source")
@@ -880,32 +1202,41 @@ class SlideshowManager:
             _LOGGER.warning("All assets filtered out by global exclusions")
             return
 
-        # Enrich assets with full metadata using semaphore for concurrency control
+        # Enrich assets with full metadata using semaphore for concurrency control.
+        # Search results already carry exifInfo + people (withExif/withPeople),
+        # so only assets without dimensions (e.g. memories) need a GET. Both
+        # payloads come from Immich's same asset mapper, so isFavorite has the
+        # same meaning either way: the favorite flag as seen by the API key's
+        # user (partner assets report the owner's flag only to the owner).
         semaphore = asyncio.Semaphore(API_CONCURRENCY_LIMIT)
 
+        def apply_info(asset: dict, info: dict) -> dict:
+            exif = info.get("exifInfo") or {}
+            asset["originalWidth"] = exif.get("exifImageWidth", 0)
+            asset["originalHeight"] = exif.get("exifImageHeight", 0)
+            asset["exifInfo"] = exif
+            asset["originalFileName"] = info.get("originalFileName")
+            asset["isFavorite"] = info.get("isFavorite", False)
+            asset["localDateTime"] = info.get("localDateTime")
+            asset["people"] = info.get("people", [])
+            # Live Photo support: store video ID if present
+            asset["livePhotoVideoId"] = info.get("livePhotoVideoId")
+            return asset
+
         async def enrich_asset(asset: dict) -> dict | None:
+            if has_dimensions(asset):
+                return apply_info(asset, asset)
             async with semaphore:
                 info = await self._hub.get_asset_info(asset["id"])
                 if info:
-                    exif = info.get("exifInfo", {})
-                    asset["originalWidth"] = exif.get("exifImageWidth", 0)
-                    asset["originalHeight"] = exif.get("exifImageHeight", 0)
-                    asset["exifInfo"] = exif
-                    asset["originalFileName"] = info.get("originalFileName")
-                    asset["isFavorite"] = info.get("isFavorite", False)
-                    asset["localDateTime"] = info.get("localDateTime")
-                    asset["people"] = info.get("people", [])
-                    asset["albumIds"] = info.get("albumIds", [])
-                    # Live Photo support: store video ID if present
-                    asset["livePhotoVideoId"] = info.get("livePhotoVideoId")
-                    return asset
+                    return apply_info(asset, info)
                 return None
 
         # Run enrichment concurrently with limited parallelism
         enriched = await asyncio.gather(*[enrich_asset(a) for a in all_assets])
         enriched_assets = [a for a in enriched if a is not None]
 
-        # Apply exclusions again after enrichment (now we have albumIds and people)
+        # Apply exclusions again after enrichment (now memory assets have people)
         enriched_assets = self._apply_global_exclusions(enriched_assets)
 
         random.shuffle(enriched_assets)
@@ -920,22 +1251,37 @@ class SlideshowManager:
     def _pop_from_pool(
         self, count: int = 1, portrait_only: bool = False
     ) -> list[dict]:
-        """Pop assets from the pool."""
-        result = []
-        remaining = []
+        """Pop assets from the pool.
+
+        Assets shown less than SHOWN_MEMORY_HOURS ago are skipped. Anti-famine
+        guard: if only recently-shown assets match, the least recently shown
+        ones are used instead of returning nothing.
+        """
+        result: list[dict] = []
+        remaining: list[dict] = []
+        recently_shown: list[dict] = []
 
         for asset in self._asset_pool:
+            if self._is_bad_asset(asset):
+                continue  # Marked undisplayable since it entered the pool
             if len(result) < count:
-                if portrait_only:
-                    if is_portrait(asset):
-                        result.append(asset)
-                    else:
-                        remaining.append(asset)
+                if portrait_only and not is_portrait(asset):
+                    remaining.append(asset)
+                elif self._is_recently_shown(asset):
+                    recently_shown.append(asset)
                 else:
                     result.append(asset)
             else:
                 remaining.append(asset)
 
+        # Anti-famine: top up from the least recently shown candidates
+        if len(result) < count and recently_shown:
+            recently_shown.sort(key=lambda a: self._shown.get(a.get("id"), 0.0))
+            while len(result) < count and recently_shown:
+                result.append(recently_shown.pop(0))
+
+        # Unused recently-shown assets go back to the pool (at the end)
+        remaining.extend(recently_shown)
         self._asset_pool = remaining
         return result
 
@@ -1016,6 +1362,24 @@ class SlideshowManager:
         return data
 
 
+def decode_image(image_bytes: bytes) -> Image.Image:
+    """Decode bytes into an EXIF-transposed RGB/L image (raises on failure)."""
+    img = Image.open(io.BytesIO(image_bytes))
+    # Force full decode now: a truncated/unsupported file must fail here, not
+    # later while resizing for display.
+    img.load()
+    img = ImageOps.exif_transpose(img)
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    return img
+
+
+def has_dimensions(asset: dict[str, Any]) -> bool:
+    """Return True if the asset already carries EXIF width and height."""
+    exif = asset.get("exifInfo") or {}
+    return bool(exif.get("exifImageWidth")) and bool(exif.get("exifImageHeight"))
+
+
 def is_portrait(asset: dict[str, Any]) -> bool:
     """Check if an asset is portrait orientation after EXIF rotation."""
     width = asset.get("originalWidth", 0)
@@ -1061,6 +1425,11 @@ async def async_setup_entry(
     source_persons_weight = options.get(CONF_SOURCE_PERSONS_WEIGHT, DEFAULT_SOURCE_PERSONS_WEIGHT)
     recent_days = options.get(CONF_RECENT_DAYS, DEFAULT_RECENT_DAYS)
     recent_favorites_filter = options.get(CONF_RECENT_FAVORITES_FILTER, DEFAULT_RECENT_FAVORITES_FILTER)
+    recent_boost_days = options.get(CONF_RECENT_BOOST_DAYS, DEFAULT_RECENT_BOOST_DAYS)
+    recent_boost_share = options.get(CONF_RECENT_BOOST_SHARE, DEFAULT_RECENT_BOOST_SHARE)
+    recent_boost_reshow_hours = options.get(
+        CONF_RECENT_BOOST_RESHOW_HOURS, DEFAULT_RECENT_BOOST_RESHOW_HOURS
+    )
     memories_max_years = options.get(CONF_MEMORIES_MAX_YEARS, DEFAULT_MEMORIES_MAX_YEARS)
 
     # Albums/Persons includes
@@ -1070,6 +1439,7 @@ async def async_setup_entry(
     # Global exclusions
     exclude_albums = options.get(CONF_EXCLUDE_ALBUMS, [])
     exclude_persons = options.get(CONF_EXCLUDE_PERSONS, [])
+    include_archived = options.get(CONF_INCLUDE_ARCHIVED, DEFAULT_INCLUDE_ARCHIVED)
 
     resolutions = parse_resolutions(options.get(CONF_RESOLUTIONS, DEFAULT_RESOLUTIONS))
     if not resolutions:
@@ -1079,6 +1449,14 @@ async def async_setup_entry(
         "Setting up slideshow: resolutions=%s, weights={recent=%d, memories=%d, albums=%d, persons=%d}",
         resolutions, source_recent_weight, source_memories_weight,
         source_albums_weight, source_persons_weight,
+    )
+
+    # Anti-repetition: persistent "recently shown" history for this entry
+    # (stored in .storage/immich_slideshow_shown_<entry_id>)
+    shown_store: Store = Store(
+        hass,
+        SHOWN_STORAGE_VERSION,
+        f"{SHOWN_STORAGE_KEY}_{config_entry.entry_id}",
     )
 
     # Create shared manager
@@ -1091,12 +1469,20 @@ async def async_setup_entry(
         source_persons_weight=source_persons_weight,
         recent_days=recent_days,
         recent_favorites_filter=recent_favorites_filter,
+        recent_boost_days=recent_boost_days,
+        recent_boost_share=recent_boost_share,
+        recent_boost_reshow_hours=recent_boost_reshow_hours,
         memories_max_years=memories_max_years,
         albums_include=albums_include,
         persons_include=persons_include,
         exclude_albums=exclude_albums,
         exclude_persons=exclude_persons,
+        include_archived=include_archived,
+        shown_store=shown_store,
     )
+
+    # Load persisted shown-history before the first refresh
+    await manager.async_load_shown()
 
     # Store manager in hass.data for diagnostic sensors to access
     hass.data[DOMAIN][f"{config_entry.entry_id}_manager"] = manager

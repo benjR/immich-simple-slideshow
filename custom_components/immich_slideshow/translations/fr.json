@@ -13,7 +13,7 @@
       },
       "api_key": {
         "title": "Immich Simple Slideshow - Clé API",
-        "description": "Créez une clé API dans Immich : [{api_keys_url}]({api_keys_url})\n\nPermissions requises : **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**",
+        "description": "Créez une clé API dans Immich : [{api_keys_url}]({api_keys_url})\n\nPermissions requises : **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**\n\nRecommandée : **asset.view** (affiche les HEIC et autres formats via la version convertie par Immich)",
         "data": {
           "api_key": "Clé API"
         },
@@ -29,7 +29,10 @@
             "name": "Photos récentes — N derniers jours",
             "data": {
               "recent_days": "Jours en arrière (0 = illimité)",
-              "recent_favorites_filter": "Filtre favoris"
+              "recent_favorites_filter": "Filtre favoris",
+              "recent_boost_days": "Fenêtre de boost — jours « très récents » (0 = désactivé)",
+              "recent_boost_share": "Part du boost — % des tirages récents issus de la fenêtre",
+              "recent_boost_reshow_hours": "Délai de réaffichage du boost — heures avant qu'une photo boostée puisse revenir"
             }
           },
           "memories_source": {
@@ -65,6 +68,7 @@
             "data": {
               "exclude_albums": "Exclusions — Albums",
               "exclude_persons": "Exclusions — Personnes",
+              "include_archived": "Filtres — Inclure les photos archivées",
               "resolutions": "Affichage — Résolutions",
               "refresh_interval": "Affichage — Intervalle (secondes)",
               "dual_portrait": "Affichage — Double portrait",
@@ -101,14 +105,17 @@
           "api_key": "Clé API"
         },
         "data_description": {
-          "api_key": "Permissions requises : **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**. Gérer les clés : [{api_keys_url}]({api_keys_url})"
+          "api_key": "Permissions requises : **asset.read**, **asset.download**, **memory.read**, **album.read**, **person.read**, **user.read**. Recommandée : **asset.view** (affiche les HEIC et autres formats via la version convertie par Immich). Gérer les clés : [{api_keys_url}]({api_keys_url})"
         },
         "sections": {
           "recent_source": {
             "name": "Photos récentes — N derniers jours",
             "data": {
               "recent_days": "Jours en arrière (0 = illimité)",
-              "recent_favorites_filter": "Filtre favoris"
+              "recent_favorites_filter": "Filtre favoris",
+              "recent_boost_days": "Fenêtre de boost — jours « très récents » (0 = désactivé)",
+              "recent_boost_share": "Part du boost — % des tirages récents issus de la fenêtre",
+              "recent_boost_reshow_hours": "Délai de réaffichage du boost — heures avant qu'une photo boostée puisse revenir"
             }
           },
           "memories_source": {
@@ -144,6 +151,7 @@
             "data": {
               "exclude_albums": "Exclusions — Albums",
               "exclude_persons": "Exclusions — Personnes",
+              "include_archived": "Filtres — Inclure les photos archivées",
               "resolutions": "Affichage — Résolutions",
               "refresh_interval": "Affichage — Intervalle (secondes)",
               "dual_portrait": "Affichage — Double portrait",
@@ -166,6 +174,10 @@
     }
   },
   "issues": {
+    "missing_recommended_permissions": {
+      "title": "La clé API Immich n'a pas une permission recommandée",
+      "description": "Votre clé API Immich Slideshow n'a pas la ou les permissions recommandées : **{missing}**.\n\nLe diaporama continue de fonctionner, mais les photos que Home Assistant ne sait pas décoder depuis le fichier original (HEIC enregistré en .jpg, PSD, très grands panoramas…) sont ignorées au lieu d'être affichées depuis le JPEG converti par Immich. Modifiez la clé dans Immich sous [Clés API]({url}), ajoutez la permission, et enregistrez. L'avertissement disparaît automatiquement au prochain rechargement."
+    },
     "missing_permissions": {
       "title": "La clé API Immich manque de permissions",
       "description": "Votre clé API Immich Slideshow n'a pas la ou les permissions suivantes : **{missing}**.\n\nCertaines sources de photos activées ne fonctionneront pas tant qu'elles ne sont pas accordées. Modifiez la clé dans Immich sous [Clés API]({url}), ajoutez la ou les permissions manquantes, et enregistrez. Pas besoin de re-saisir la clé ici — l'avertissement disparaît automatiquement au prochain rechargement."
